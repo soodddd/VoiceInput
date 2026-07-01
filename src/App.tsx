@@ -22,6 +22,44 @@ import { ModelDownload } from './components/ModelDownload';
 import { LoadingIcon } from './components/Icons';
 import type { AppView, Language } from './types';
 
+/** 当前版本号（与 package.json / Cargo.toml 保持一致） */
+const CURRENT_VERSION = '0.1.2';
+/** GitHub 仓库地址（用于更新检查） */
+const GITHUB_REPO = 'soodddd/VoiceInput';
+
+/**
+ * 启动时检查 GitHub 是否有新版本发布。
+ * 如果有新版本，通过对话框提示用户前往下载。
+ * 检查失败时静默忽略，不影响正常使用。
+ */
+async function checkForUpdates(): Promise<void> {
+  try {
+    const resp = await fetch(
+      `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
+      { signal: AbortSignal.timeout(8000) }
+    );
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const tagName: string = data.tag_name || '';
+    // 解析 tag，格式如 "v0.1.3-preview"
+    const latestVersion = tagName.replace(/^v/, '').replace(/-preview$/, '');
+    if (latestVersion && latestVersion > CURRENT_VERSION) {
+      const { message, confirm } = await import('@tauri-apps/plugin-dialog');
+      const confirmed = await confirm(
+        `发现新版本 ${tagName}！\n\n当前版本：v${CURRENT_VERSION}\n新版本包含改进和修复。\n\n是否前往下载新版本？`,
+        { title: '发现新版本', kind: 'info', okLabel: '前往下载', cancelLabel: '稍后再说' }
+      );
+      if (confirmed) {
+        await message(`请在浏览器中打开：\nhttps://github.com/${GITHUB_REPO}/releases/latest`, {
+          title: '下载地址',
+        });
+      }
+    }
+  } catch {
+    // 网络错误或超时，静默忽略
+  }
+}
+
 const LANGUAGE_CYCLE: Language[] = ['auto', 'Chinese', 'English'];
 
 interface WindowSize {
@@ -32,7 +70,7 @@ interface WindowSize {
 const VIEW_SIZES: Record<AppView, WindowSize> = {
   waiting: { width: 280, height: 160 },
   floating: { width: 280, height: 220 },
-  settings: { width: 500, height: 580 },
+  settings: { width: 500, height: 640 },
   download: { width: 480, height: 620 },
   error: { width: 280, height: 160 },
 };
@@ -105,6 +143,14 @@ function App(): JSX.Element {
         .catch(() => {});
     }
   }, [backendReady, modelStatus.loaded, refreshModelStatus]);
+
+  // 启动后延迟检查更新（避免与启动流程竞争）
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void checkForUpdates();
+    }, 8000);
+    return () => clearTimeout(timer);
+  }, []);
 
   // 语言切换
   const handleLanguageChange = useCallback((lang: Language) => {

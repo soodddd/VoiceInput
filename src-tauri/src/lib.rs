@@ -61,18 +61,28 @@ pub fn run() {
     log::info!("VoiceInput v2 启动中...");
 
     tauri::Builder::default()
+        // 单实例锁必须第一个注册：第二个实例启动时触发回调并自动退出
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            log::info!("检测到第二个实例启动，聚焦主窗口");
+            if let Some(window) = app.get_webview_window("floating") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // ── 1. GPU 检测 ──
             log::info!("[1/6] 检测 NVIDIA GPU...");
             if let Err(e) = gpu_check::check_nvidia_gpu() {
                 log::error!("GPU 检测失败: {}", e);
-                // 生产环境直接退出；开发模式仅警告
+                // 显示友好的弹窗提示，而非直接闪退
+                show_gpu_error_dialog(&e);
+                // 仍然退出（无 GPU 无法运行 ASR），但用户已知道原因
                 #[cfg(not(debug_assertions))]
                 {
-                    eprintln!("FATAL: {}", e);
                     std::process::exit(1);
                 }
                 #[cfg(debug_assertions)]
@@ -227,4 +237,43 @@ fn init_logging() {
     dispatch.apply().expect("Failed to initialize logging");
 
     log::info!("日志文件: {}", log_file.display());
+}
+
+/// 显示 GPU 检测失败的友好弹窗。
+///
+/// 使用 Windows MessageBox API（无需应用窗口已创建），
+/// 给出清晰的中文提示和解决建议。
+#[cfg(windows)]
+fn show_gpu_error_dialog(error: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
+    };
+    use windows::core::PCWSTR;
+
+    let title: Vec<u16> = "VoiceInput 无法启动\0"
+        .encode_utf16()
+        .collect();
+    let message = format!(
+        "抱歉，VoiceInput 无法启动。\n\n原因：{}\n\n解决方法：\n\
+        1. 确认你的电脑有 NVIDIA 独立显卡\n\
+        2. 安装最新的 NVIDIA 显卡驱动\n\
+        3. 如果是笔记本电脑，请在 NVIDIA 控制面板中设置使用独立显卡\n\n\
+        如需帮助，请访问 GitHub 仓库提交 issue。",
+        error
+    );
+    let message_wide: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(message_wide.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn show_gpu_error_dialog(error: &str) {
+    eprintln!("FATAL: {}", error);
 }

@@ -8,7 +8,7 @@
 # ============================================================
 
 param(
-    [string]$Version = "0.1.1-preview",
+    [string]$Version = "0.1.2-preview",
     [string]$OutputDir = ".\release"
 )
 
@@ -118,7 +118,7 @@ if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir | Out-Null
 }
 
-$ZipName = "VoiceInput-v0.1.1-win64-preview.zip"
+$ZipName = "VoiceInput-v$Version-win64.zip"
 $ZipPath = Join-Path $OutputDir $ZipName
 
 if (Test-Path $ZipPath) {

@@ -51,6 +51,59 @@ export function useRecorder(language: Language): UseRecorderReturn {
   const decayTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mountedRef = useRef(true);
 
+  /**
+   * 将后端/系统错误信息转换为用户友好的中文提示。
+   * 区分常见错误场景：麦克风问题、后端未就绪、网络错误、GPU 问题等。
+   */
+  const friendlyErrorMessage = useCallback((err: unknown, context: 'start' | 'stop'): string => {
+    const raw = err instanceof Error ? err.message : String(err);
+    const lower = raw.toLowerCase();
+
+    // 麦克风相关错误
+    if (lower.includes('device') && (lower.includes('not found') || lower.includes('unavailable'))) {
+      return '找不到麦克风，请检查麦克风是否已连接';
+    }
+    if (lower.includes('permission') || lower.includes('denied') || lower.includes('access')) {
+      return '麦克风访问被拒绝，请在系统设置中允许使用麦克风';
+    }
+    if (lower.includes('busy') || lower.includes('occupied') || lower.includes('in use')) {
+      return '麦克风被其他程序占用，请关闭其他录音软件后重试';
+    }
+    if (lower.includes('no device') || lower.includes('nodevice')) {
+      return '没有可用的麦克风，请连接麦克风后重试';
+    }
+
+    // 后端未就绪
+    if (lower.includes('connection refused') || lower.includes('econnrefused')) {
+      return context === 'start'
+        ? '语音服务未启动，请稍候几秒再试'
+        : '语音服务连接失败，请检查服务是否正常运行';
+    }
+    if (lower.includes('timeout') || lower.includes('timed out')) {
+      return '请求超时，可能 GPU 正在加载模型，请稍候再试';
+    }
+
+    // GPU 相关
+    if (lower.includes('cuda') || lower.includes('gpu') || lower.includes('out of memory')) {
+      return 'GPU 显存不足或不可用，请关闭其他占显存的程序后重试';
+    }
+
+    // 网络错误（模型下载等）
+    if (lower.includes('network') || lower.includes('dns') || lower.includes('connect')) {
+      return '网络连接失败，请检查网络后重试';
+    }
+
+    // 空音频
+    if (lower.includes('empty') || lower.includes('no audio')) {
+      return '录音太短，请长按说话';
+    }
+
+    // 默认：保留原始信息但加上友好前缀
+    return context === 'start'
+      ? `录音启动失败：${raw}`
+      : `识别失败：${raw}`;
+  }, []);
+
   useEffect(() => {
     languageRef.current = language;
   }, [language]);
@@ -111,12 +164,10 @@ export function useRecorder(language: Language): UseRecorderReturn {
     } catch (err) {
       if (mountedRef.current) {
         setStatus('error');
-        setErrorMessage(
-          err instanceof Error ? err.message : '录音启动失败，请检查麦克风设置'
-        );
+        setErrorMessage(friendlyErrorMessage(err, 'start'));
       }
     }
-  }, [startTimer]);
+  }, [startTimer, friendlyErrorMessage]);
 
   /** 内部：执行录音停止+识别+粘贴逻辑（供事件和手动调用共用） */
   const doStopRecording = useCallback(async () => {
@@ -155,12 +206,10 @@ export function useRecorder(language: Language): UseRecorderReturn {
     } catch (err) {
       if (mountedRef.current) {
         setStatus('error');
-        setErrorMessage(
-          err instanceof Error ? err.message : '识别失败，请重试'
-        );
+        setErrorMessage(friendlyErrorMessage(err, 'stop'));
       }
     }
-  }, [stopTimer, startDecay]);
+  }, [stopTimer, startDecay, friendlyErrorMessage]);
 
   const handleAudioLevel = useCallback((level: number) => {
     if (mountedRef.current) {

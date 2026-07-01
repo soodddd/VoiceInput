@@ -135,14 +135,13 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
             }
         }
         MENU_SETTINGS => {
-            if let Some(window) = app.get_webview_window("settings") {
+            // VoiceInput 只有一个 floating 窗口，设置面板通过前端视图切换实现。
+            // 总是 emit 事件，由前端切换到 settings 视图并显示窗口。
+            if let Some(window) = app.get_webview_window("floating") {
                 let _ = window.show();
                 let _ = window.set_focus();
-            } else {
-                // 尝试创建设置窗口
-                log::info!("设置窗口不存在，前端需处理此事件");
-                let _ = app.emit("open-settings", ());
             }
+            let _ = app.emit("open-settings", ());
         }
         MENU_LANG_AUTO => {
             let _ = app.emit("set-language", "auto");

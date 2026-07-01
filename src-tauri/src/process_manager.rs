@@ -18,8 +18,8 @@ pub struct BackendManager {
     port: u16,
     /// 模型目录路径
     model_dir: String,
-    /// 模型策略: "fast" / "balanced" / "accurate"
-    model_strategy: String,
+    /// 模型策略: "fast" / "balanced" / "accurate" / "memory"
+    pub model_strategy: String,
     /// 服务地址（http://127.0.0.1:port）
     server_url: String,
 }
@@ -35,7 +35,7 @@ impl BackendManager {
     /// - `token`: 鉴权 token
     /// - `port`: 监听端口（默认 8765）
     /// - `model_dir`: 模型存储目录
-    /// - `model_strategy`: 模型策略（"fast" / "balanced" / "accurate"）
+    /// - `model_strategy`: 模型策略（"fast" / "balanced" / "accurate" / "memory"）
     pub fn new(token: String, port: u16, model_dir: String, model_strategy: String) -> Self {
         let server_url = format!("http://127.0.0.1:{}", port);
         BackendManager {
