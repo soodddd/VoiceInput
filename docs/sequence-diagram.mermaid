@@ -1,0 +1,209 @@
+%% VoiceInput v2 — 时序图（Sequence Diagrams）
+
+%% ============ 1. 主程序启动流程 ============
+sequenceDiagram
+    participant U as 用户
+    participant T as Tauri 主程序 (Rust)
+    participant G as GpuChecker
+    participant C as Config 模块
+    participant PM as ProcessManager
+    participant B as ASR 后端 (Python)
+    participant W as 悬浮窗 (React)
+
+    U->>T: 双击 VoiceInput.exe
+
+    T->>G: check_nvidia_gpu()
+    alt 无 NVIDIA GPU
+        G-->>T: false
+        T->>W: 显示错误 "需要 NVIDIA 独立显卡"
+        T->>T: 阻止启动
+    else 有 NVIDIA GPU
+        G-->>T: true (+ GPU 信息)
+
+        T->>C: Config::load()
+        C->>C: 读取 AppData/.../config.json
+        alt 首次运行 (无 config)
+            C->>C: 生成随机 token (UUID v4)
+            C->>C: 写入 config.json (含 token + 默认值)
+        end
+        C-->>T: Config { token, server_url, ... }
+
+        T->>PM: start_sidecar(app)
+        PM->>PM: 查找 asr_backend.exe (sidecar)
+        PM->>B: 启动 asr_backend.exe --token <token>
+        Note over B: FastAPI 启动, 绑定 127.0.0.1:8765
+
+        T->>PM: wait_for_backend(url, token, timeout=60s)
+        loop 每 500ms 轮询
+            T->>B: GET /health (Header: X-VoiceInput-Token)
+            B-->>T: 200 { status: "ok", model_loaded: false }
+        end
+        B-->>T: 后端就绪
+
+        T->>B: GET /model/status
+        B-->>T: { loaded: false }
+
+        T->>W: 检测模型是否存在
+        alt 模型未下载
+            W->>U: 显示欢迎引导 + 模型下载界面
+            U->>W: 选择下载源 (ModelScope/HF/本地路径)
+            W->>B: POST /model/download { source }
+            B->>B: modelscope.snapshot_download() 断点续传
+            B-->>W: 下载进度事件 (via SSE / 轮询)
+            W->>U: 显示下载进度条
+            B-->>W: 下载完成
+        end
+
+        T->>B: POST /model/load (Header: X-VoiceInput-Token)
+        B->>B: Qwen3ASRModel.from_pretrained(dtype=bf16, device=cuda)
+        B-->>T: { status: "loaded" }
+
+        T->>W: 发送事件 "backend-ready"
+        W->>U: 悬浮窗出现: "按住 Alt+V 说话"
+        T->>T: 注册系统托盘
+        T->>T: 注册全局快捷键 (rdev 监听)
+    end
+
+%% ============ 2. 录音识别完整流程 ============
+sequenceDiagram
+    participant U as 用户
+    participant H as HotkeyManager (Rust)
+    participant R as Recorder (Rust/cpal)
+    participant T as Tauri 主程序
+    participant W as 悬浮窗 (React)
+    participant B as ASR 后端 (Python)
+    participant P as PasteHelper (Rust)
+    participant S as 目标应用
+
+    Note over U,S: 前提: 后端就绪, 悬浮窗可见
+
+    U->>S: 将光标放在输入框中
+    U->>H: 按下 Alt+V
+
+    H->>H: 检测 modifier(Alt) + trigger(V) 同时按下
+    H->>T: on_key_press → emit "recording-start"
+    T->>W: emit("state-change", "recording")
+    W->>U: 显示波形动画 + "正在录音..."
+
+    T->>R: recorder.start(device, 16000)
+    R->>R: cpal 获取输入设备, 配置 StreamConfig
+    R->>R: 启动 cpal InputStream
+    Note over R: 数据回调: 每 ~2048 采样收集 i16 数据
+
+    loop 录音中
+        R->>R: buffer.extend(samples)
+        R->>T: emit("recording-level", rms_level)
+        T->>W: emit("recording-level", level)
+        W->>U: 波形动画跟随音量变化
+    end
+
+    U->>H: 松开 Alt+V
+    H->>H: 检测 trigger(V) key-up
+    H->>T: on_key_release → emit "recording-stop"
+
+    T->>R: recorder.stop()
+    R->>R: 停止 cpal Stream
+    R->>R: 取出 buffer: Vec<i16>
+    R-->>T: 返回 i16 采样数据
+
+    T->>T: AudioConverter::samples_to_wav(samples, sr, 1)
+    T->>W: emit("state-change", "processing")
+    W->>U: 显示 "正在本地识别..."
+
+    T->>B: POST /transcribe (WAV bytes + X-VoiceInput-Token)
+    activate B
+
+    B->>B: load_and_preprocess(wav_bytes)
+    B->>B: 音量归一化 (-1 dBFS)
+    B->>B: trim_silence (去头尾静音)
+    B->>B: chunk_audio (> 25s 在静音处分段)
+
+    loop 每个分段
+        B->>B: model.transcribe(chunk, language)
+        B->>B: 收集识别文本
+    end
+
+    B->>B: 合并分段结果
+    B->>B: clean_transcription (清理重复/空格)
+    B->>B: apply_term_corrections (术语修正)
+
+    B-->>T: 200 { text, language, duration_ms, process_ms }
+    deactivate B
+
+    T->>W: emit("transcribe-result", { text, ... })
+    W->>U: 显示识别文本 + [清空][复制][插入] 按钮
+
+    T->>P: paste_text(text, delay_ms, restore)
+    P->>P: save_clipboard() → 保存原剪贴板
+    P->>P: write_clipboard(text) → 写入识别文本
+    P->>S: 模拟 Ctrl+V (SendInput)
+    S->>U: 文字出现在光标位置
+    P->>P: 延迟 800ms
+    P->>P: restore_clipboard(old) → 恢复原剪贴板
+
+    T->>W: emit("paste-done")
+    W->>U: Toast "已粘贴到光标位置"
+
+    U->>W: 可选: 点击 [复制] / [插入 →]
+
+%% ============ 3. 后端 ASR 推理流程 ============
+sequenceDiagram
+    participant T as Tauri 主程序
+    participant B as FastAPI Server
+    participant A as AudioUtils
+    participant E as ASREngine
+    participant M as Qwen3-ASR Model
+    participant P as PostProcessor
+
+    T->>B: POST /transcribe (multipart: audio.wav, language=auto)
+    B->>B: 验证 X-VoiceInput-Token header
+    alt Token 无效
+        B-->>T: 403 { detail: "invalid token" }
+    end
+
+    B->>B: 读取 audio file bytes
+    B->>A: load_and_preprocess(wav_bytes)
+
+    A->>A: soundfile.read() → float32 numpy
+    A->>A: 多声道 → mono (mean axis=1)
+    alt 采样率 ≠ 16000
+        A->>A: scipy.resample_poly → 16kHz
+    end
+    A->>A: 峰值归一化 → -1 dBFS (×0.891/peak)
+    A->>A: trim_silence (RMS 帧检测, threshold=-40dB)
+
+    A-->>B: (audio_np: ndarray, sr: 16000)
+
+    B->>A: chunk_audio(audio_np, sr, threshold_sec=25.0)
+    A->>A: find_split_points (静音检测)
+    alt 音频 > 25s 且找到静音分割点
+        A-->>B: [chunk1, chunk2, ...] (带 1s 重叠)
+    else 音频 ≤ 25s 或无分割点
+        A-->>B: [audio_np] (单段)
+    end
+
+    loop 每个分段 chunk_i
+        B->>E: transcribe(chunk_i, sr=16000, language)
+        E->>E: 若 model is None → 自动 load()
+        E->>M: model.transcribe(audio=(chunk, sr), language=lang)
+        M->>M: 前端特征提取 (mel-spectrogram)
+        M->>M: Transformer encoder
+        M->>M: Decoder (autoregressive generation)
+        M-->>E: result = [TranscriptionResult(text, language)]
+        E-->>B: text_i, lang_i
+    end
+
+    B->>B: 合并: text = " ".join(all_texts)
+    B->>P: clean_transcription(text)
+    P->>P: 去重复词 (regex)
+    P->>P: 修正标点前空格
+    P->>P: 合并多余空格
+    P-->>B: cleaned_text
+
+    B->>P: apply_term_corrections(cleaned_text)
+    P->>P: 查 TERM_CORRECTIONS 词典
+    P->>P: "派森" → "Python", "泰瑞" → "Tauri", ...
+    P-->>B: final_text
+
+    B->>B: 构建 TranscribeResponse
+    B-->>T: 200 { text, language, duration_ms, process_ms, chunks }

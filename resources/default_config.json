@@ -1,0 +1,19 @@
+{
+  "hotkey": "alt+v",
+  "language_hotkey": "alt+l",
+  "language": "auto",
+  "sample_rate": 16000,
+  "channels": 1,
+  "paste_delay_ms": 800,
+  "clipboard_restore": true,
+  "input_device": null,
+  "normalize_audio": true,
+  "trim_silence": true,
+  "silence_threshold_db": -40,
+  "max_record_sec": 120,
+  "request_timeout_sec": 120,
+  "server_url": "http://127.0.0.1:8765",
+  "model_path": null,
+  "model_strategy": "balanced",
+  "custom_terms": {}
+}

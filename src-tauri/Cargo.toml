@@ -1,0 +1,59 @@
+[package]
+name = "voiceinput"
+version = "0.1.0"
+description = "VoiceInput - Windows local voice input"
+authors = ["VoiceInput Team"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "voiceinput_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri 2 核心框架
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-store = "2"
+
+# 序列化 / 反序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 音频录制 — cpal (WASAPI 后端)
+cpal = "0.15"
+
+# 全局快捷键 — rdev (push-to-talk, 支持 key-down / key-up)
+rdev = { version = "0.5", features = ["unstable_grab"] }
+
+# HTTP 客户端 — 调用 Python sidecar 的 REST API
+reqwest = { version = "0.12", features = ["multipart", "json", "blocking"] }
+
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+
+# 工具
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+env_logger = "0.11"
+fern = "0.6"
+chrono = "0.4"
+thiserror = "1"
+
+# Windows API (SendInput 粘贴、剪贴板、窗口管理等)
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.54", features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_Foundation",
+] }

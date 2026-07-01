@@ -1,0 +1,86 @@
+# ============================================================
+# VoiceInput v2 — .gitignore
+# 关键：排除大型二进制（sidecar 2.7GB）、构建产物、临时文件
+# ============================================================
+
+# ── Node.js / 前端 ──
+node_modules/
+dist/
+*.log
+npm-debug.log*
+
+# ── Rust / Tauri ──
+src-tauri/target/
+src-tauri/gen/
+
+# ── Python sidecar 二进制（关键！2.7GB，禁止推送）──
+src-tauri/binaries/*.exe
+# 保留 .gitkeep 以维持目录结构
+!src-tauri/binaries/.gitkeep
+
+# ── 发布产物（zip 分发包，2.6GB+）──
+release/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+develop-eggs/
+
+# ── PyInstaller 临时构建 ──
+*.spec.bak
+build_backend.log
+
+# ── 虚拟环境 ──
+.venv/
+venv/
+env/
+
+# ── IDE / 编辑器 ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── 操作系统 ──
+Desktop.ini
+ehthumbs.db
+
+# ── 临时测试文件（根目录）──
+test_*.py
+test_*.cjs
+test_*.wav
+test_*.png
+test_*.vtt
+screenshot*.png
+cdp_*.py
+cdp_*.png
+capture_*.py
+analyze_*.py
+find_window.py
+quick_check.py
+reset_app.py
+reset_state.py
+final_check.py
+take_screenshot.py
+convert_audio.py
+check_window_state.py
+tauri_dev_log.txt
+transcribe_result.json
+test_shots/
+
+# ── 日志 ──
+*.log
+logs/
+backend/sidecar_*.log
+
+# ── 模型文件（用户本地下载）──
+*.bin
+*.safetensors
+model_cache/

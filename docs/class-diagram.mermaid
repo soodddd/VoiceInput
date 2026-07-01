@@ -1,0 +1,261 @@
+%% VoiceInput v2 — 类图（Class Diagram）
+%% 包含 Rust 层 / React 层 / Python 层核心数据结构与接口
+
+classDiagram
+
+    %% ============ Rust 层 ============
+    class AppState {
+        +config: Config
+        +recording_state: RecordingState
+        +sidecar_child: Option~Child~
+        +token: String
+        +backend_ready: bool
+        +app_handle: AppHandle
+        -init() Result
+        -shutdown()
+    }
+
+    class Config {
+        +hotkey: String
+        +language_hotkey: String
+        +server_url: String
+        +language: String
+        +sample_rate: u32
+        +channels: u16
+        +paste_delay_ms: u32
+        +clipboard_restore: bool
+        +input_device: Option~u32~
+        +normalize_audio: bool
+        +trim_silence: bool
+        +silence_threshold_db: f32
+        +max_record_sec: u32
+        +request_timeout_sec: u32
+        +model_path: Option~String~
+        +model_strategy: String
+        +load() Config
+        +save(cfg: Config) Result
+        +generate_token() String
+    }
+
+    class RecordingState {
+        +is_recording: bool
+        +buffer: Vec~i16~
+        +actual_sample_rate: u32
+        +start_time: Instant
+        +max_level: i16
+    }
+
+    class Recorder {
+        -stream: Option~Stream~
+        -buffer: Arc~Mutex~Vec~~i16~~~
+        -is_recording: Arc~Mutex~bool~~
+        -actual_sample_rate: u32
+        +start(device: Option~u32~, target_sr: u32) Result
+        +stop() Vec~i16~
+        -build_input_callback() impl Fn
+        +calculate_rms(samples: &[i16]) f32
+    }
+
+    class HotkeyManager {
+        -modifier_keys: Vec~Key~
+        -trigger_key: Key
+        -pressed_mods: Arc~Mutex~HashSet~~
+        -listener_handle: Option~JoinHandle~
+        +start(app: AppHandle, hotkey: String) Result
+        +stop()
+        -parse_hotkey(s: &str) (Vec~Key~, Key)
+        -on_key_press(app: AppHandle)
+        -on_key_release(app: AppHandle)
+    }
+
+    class ProcessManager {
+        +start_sidecar(app: &AppHandle) Result~Child~
+        +stop_sidecar(child: &mut Child)
+        +check_backend_health(url: &str, token: &str) bool
+        +wait_for_backend(url: &str, token: &str, timeout_secs: u64) bool
+        +restart_if_crashed(app: &AppHandle)
+    }
+
+    class PasteHelper {
+        +paste_text(text: &str, delay_ms: u32, restore: bool)
+        -write_clipboard(text: &str)
+        -simulate_ctrl_v()
+        -save_clipboard() String
+        -restore_clipboard(old: String)
+    }
+
+    class TrayManager {
+        +setup_tray(app: &AppHandle)
+        +update_tray_icon(status: &str)
+        +build_menu(app: &AppHandle) Menu
+        -on_tray_click(app: &AppHandle)
+        -on_menu_event(app: &AppHandle, id: &str)
+    }
+
+    class GpuChecker {
+        +check_nvidia_gpu() bool
+        +get_gpu_info() Option~String~
+    }
+
+    class AudioConverter {
+        +samples_to_wav(samples: &[i16], sample_rate: u32, channels: u16) Vec~u8~
+        +calculate_level(samples: &[i16]) f32
+    }
+
+    AppState --> Config : owns
+    AppState --> RecordingState : owns
+    AppState --> Recorder : delegates
+    AppState --> ProcessManager : delegates
+    AppState --> PasteHelper : delegates
+    AppState --> TrayManager : delegates
+    Recorder ..> AudioConverter : uses
+
+    %% ============ React 层 ============
+    class AppProps {
+        +windowType: "floating" | "settings" | "download"
+    }
+
+    class FloatingWindowState {
+        +status: AppStatus
+        +resultText: string
+        +volumeLevel: number
+        +language: Language
+        +isExpanded: boolean
+        +toastMessage: string
+        +recordingDuration: number
+    }
+
+    class FloatingWindowProps {
+        +state: FloatingWindowState
+        +onSettingsClick: fn
+        +onClose: fn
+        +onLanguageCycle: fn
+        +onClear: fn
+        +onCopy: fn
+        +onInsert: fn
+    }
+
+    class WaveformBarsProps {
+        +active: boolean
+        +level: number
+        +paused: boolean
+    }
+
+    class SettingsState {
+        +activeTab: "mic" | "hotkey" | "audio" | "advanced"
+        +config: UserConfig
+        +devices: AudioDevice[]
+        +isTestingMic: boolean
+        +micTestResult: string
+    }
+
+    class ModelDownloadState {
+        +progress: number
+        +status: DownloadStatus
+        +source: "modelscope" | "huggingface" | "local"
+        +downloadedBytes: number
+        +totalBytes: number
+        +speed: number
+        +eta: number
+    }
+
+    class useRecordingHook {
+        +status: AppStatus
+        +volumeLevel: number
+        +resultText: string
+        +recordingDuration: number
+        -init_event_listeners()
+    }
+
+    class useBackendHook {
+        +isReady: boolean
+        +modelStatus: ModelStatus
+        +checkHealth() Promise~void~
+        +transcribe(wavBlob: Blob, lang: string) Promise~TranscribeResult~
+        +loadModel() Promise~void~
+        +unloadModel() Promise~void~
+    }
+
+    class useConfigHook {
+        +config: UserConfig
+        +updateConfig(partial: Partial~UserConfig~) Promise~void~
+        +reloadConfig() Promise~void~
+    }
+
+    FloatingWindowProps --> FloatingWindowState
+    useRecordingHook ..> FloatingWindowState : updates
+    useBackendHook ..> useRecordingHook : feeds
+
+    %% ============ Python 层 ============
+    class TranscribeResponse {
+        +text: str
+        +language: Optional~str~
+        +duration_ms: float
+        +process_ms: float
+        +chunks: int
+    }
+
+    class ModelLoadRequest {
+        +model_name: Optional~str~
+    }
+
+    class HealthResponse {
+        +status: str
+        +model: str
+        +device: str
+        +model_loaded: bool
+        +gpu_available: bool
+        +max_new_tokens: int
+    }
+
+    class ASREngine {
+        +model_path: str
+        +device: str
+        +model: Optional~Qwen3ASRModel~
+        +max_new_tokens: int
+        +load(model_name: Optional~str~) void
+        +unload() bool
+        +transcribe(audio_np: ndarray, sr: int, language: Optional~str~) str
+        +is_loaded() bool
+    }
+
+    class ModelManager {
+        +model_dir: Path
+        +model_name: str
+        +check_model_exists() bool
+        +get_model_path() str
+        +download_model(source: str) bool
+        +download_from_modelscope() bool
+        +download_from_huggingface() bool
+    }
+
+    class AudioUtils {
+        +load_and_preprocess(wav_bytes: bytes) tuple~ndarray, int~
+        +normalize_audio(audio: ndarray) ndarray
+        +trim_silence(audio: ndarray, sr: int, threshold_db: float) ndarray
+        +find_split_points(audio: ndarray, sr: int, threshold_db: float) list~int~
+        +chunk_audio(audio: ndarray, sr: int, threshold_sec: float) list~ndarray~
+    }
+
+    class PostProcessor {
+        +TERM_CORRECTIONS: dict~str, str~
+        +apply_corrections(text: str) str
+        +clean_transcription(text: str) str
+    }
+
+    class BackendConfig {
+        +HOST: str
+        +PORT: int
+        +MODEL_NAME: str
+        +DEVICE: str
+        +MAX_NEW_TOKENS: int
+        +CHUNK_THRESHOLD_SEC: float
+        +CHUNK_OVERLAP_SEC: float
+        +SILENCE_THRESHOLD_DB: int
+        +LOCAL_TOKEN: str
+    }
+
+    ASREngine ..> BackendConfig : reads
+    ModelManager ..> BackendConfig : reads
+    AudioUtils ..> BackendConfig : reads
+    TranscribeResponse ..> ASREngine : produced by

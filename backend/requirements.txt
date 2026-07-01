@@ -1,0 +1,23 @@
+# VoiceInput v2 — Python ASR 后端依赖
+#
+# 注意：PyTorch GPU 版需通过官方 CUDA 渠道单独安装，不能直接 pip install torch：
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# ── ASR 模型 ──────────────────────────────────────────────
+torch>=2.0.0
+torchaudio>=2.0.0
+qwen-asr>=0.0.6
+
+# ── Web 框架 ──────────────────────────────────────────────
+fastapi>=0.100.0
+uvicorn>=0.20.0
+python-multipart>=0.0.6
+
+# ── 音频处理 ──────────────────────────────────────────────
+soundfile>=0.12.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# ── 模型下载 ──────────────────────────────────────────────
+huggingface_hub>=0.20.0
+modelscope>=1.10.0
