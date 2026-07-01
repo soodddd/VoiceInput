@@ -43,6 +43,21 @@ class Qwen3ASREngine:
         self._idle_check_thread: threading.Thread | None = None
         self._idle_stop_event = threading.Event()
 
+    @property
+    def current_strategy(self) -> str:
+        """Return the active model strategy name."""
+        return config.MODEL_STRATEGY
+
+    @property
+    def should_unload_after_use(self) -> bool:
+        """Return True when the 'memory' strategy is active.
+
+        In this mode the model is released from GPU memory immediately
+        after each full transcription request completes, minimising
+        VRAM usage at the cost of re-loading latency on the next use.
+        """
+        return config.MODEL_STRATEGY == "memory"
+
     # ── Lifecycle ──────────────────────────────────────────────────
 
     @property

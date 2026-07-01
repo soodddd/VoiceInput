@@ -27,6 +27,10 @@ const DEFAULT_CONFIG: AppConfig = {
   server_url: 'http://127.0.0.1:8765',
   model_path: null,
   model_strategy: 'balanced',
+  auto_start: false,
+  punctuation_mode: 'simple',
+  auto_space_zh_en: true,
+  vad_enabled: true,
   token: '',
   custom_terms: {},
 };

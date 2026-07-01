@@ -70,13 +70,15 @@ DEVICE: str = os.environ.get("ASR_DEVICE", "cuda:0")
 MODEL_STRATEGY: str = os.environ.get("ASR_MODEL_STRATEGY", "balanced")
 
 #: Model strategy parameter mapping.
-#: "fast" — larger batch, more tokens, no auto-unload
-#: "balanced" — medium batch, medium tokens, 30min idle auto-unload
-#: "accurate" — smaller batch, most tokens, 30min idle auto-unload
+#: "fast" — larger batch, more tokens, no auto-unload (性能优先，常驻显存)
+#: "balanced" — medium batch, medium tokens, 30min idle auto-unload (平衡模式)
+#: "accurate" — smaller batch, most tokens, 30min idle auto-unload (质量优先)
+#: "memory" — medium batch, unload after every transcribe() call (省显存模式)
 STRATEGY_PARAMS: dict[str, dict[str, int]] = {
     "fast": {"max_inference_batch_size": 8, "max_new_tokens": 2048, "idle_timeout_sec": 0},
     "balanced": {"max_inference_batch_size": 4, "max_new_tokens": 1024, "idle_timeout_sec": 1800},
     "accurate": {"max_inference_batch_size": 2, "max_new_tokens": 4096, "idle_timeout_sec": 1800},
+    "memory": {"max_inference_batch_size": 4, "max_new_tokens": 1024, "idle_timeout_sec": -1},
 }
 
 # ── Cached GPU availability ────────────────────────────────────────

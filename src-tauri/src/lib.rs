@@ -14,6 +14,7 @@
 //! - `errors` — 统一错误类型
 
 mod audio_utils;
+mod autostart;
 mod commands;
 mod config;
 mod errors;
@@ -173,6 +174,9 @@ pub fn run() {
             commands::unload_model,
             commands::get_download_status,
             commands::cancel_download,
+            // 模型策略 (P1-06)
+            commands::get_model_strategy,
+            commands::set_model_strategy,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

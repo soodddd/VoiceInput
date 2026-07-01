@@ -155,6 +155,23 @@ export async function cancelDownload(): Promise<void> {
 }
 
 /**
+ * 获取当前模型策略
+ * @returns 包含 strategy 和 available 列表的对象
+ */
+export async function getModelStrategy(): Promise<{ strategy: string; available: string[] }> {
+  const result = await invoke<{ strategy: string; available: string[] }>('get_model_strategy');
+  return result;
+}
+
+/**
+ * 设置模型策略
+ * @param strategy 策略名: "fast" | "balanced" | "accurate" | "memory"
+ */
+export async function setModelStrategy(strategy: string): Promise<void> {
+  await invoke('set_model_strategy', { strategy });
+}
+
+/**
  * 获取音频输入设备列表
  * 调用 Rust 层 get_devices 命令，枚举系统可用麦克风。
  * 如果 Rust 层未实现此命令，会抛出异常。

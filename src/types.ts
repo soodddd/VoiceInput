@@ -50,8 +50,16 @@ export interface AppConfig {
   server_url: string;
   /** 模型路径，null 表示使用默认路径 */
   model_path: string | null;
-  /** 模型策略："fast" | "balanced" | "accurate" */
+  /** 模型策略："fast" | "balanced" | "accurate" | "memory" */
   model_strategy: string;
+  /** P2-05: 开机自启 */
+  auto_start: boolean;
+  /** P2-06: 标点模式: "raw" | "simple" | "input_method" */
+  punctuation_mode: string;
+  /** P2-07: 中英混排自动加空格 */
+  auto_space_zh_en: boolean;
+  /** P2-02: VAD 语音活动检测 */
+  vad_enabled: boolean;
   /** 本地安全 token */
   token: string;
   /** 用户自定义术语词典（ASR误识别 → 正确文本） */

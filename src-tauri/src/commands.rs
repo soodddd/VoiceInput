@@ -67,19 +67,19 @@ pub struct DownloadStatus {
 /// 开始录音。
 #[tauri::command]
 pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let (sample_rate, device) = {
+    let (sample_rate, device, vad_enabled) = {
         let cfg = state
             .config
             .lock()
             .map_err(|e| format!("锁配置失败: {}", e))?;
-        (cfg.sample_rate, cfg.input_device)
+        (cfg.sample_rate, cfg.input_device, cfg.vad_enabled)
     };
 
     let mut recorder = state
         .recorder
         .lock()
         .map_err(|e| format!("锁录音器失败: {}", e))?;
-    recorder.start(app, device, sample_rate).map_err(|e| {
+    recorder.start(app, device, sample_rate, vad_enabled).map_err(|e| {
         log::error!("开始录音失败: {}", e);
         e
     })
@@ -114,7 +114,7 @@ pub async fn transcribe_and_paste(
     language: Option<String>,
     custom_terms: Option<HashMap<String, String>>,
 ) -> Result<String, String> {
-    let (server_url, token, paste_delay, clipboard_restore, timeout_sec, config_terms) = {
+    let (server_url, token, paste_delay, clipboard_restore, timeout_sec, config_terms, punctuation_mode, auto_space) = {
         let cfg = state
             .config
             .lock()
@@ -126,6 +126,8 @@ pub async fn transcribe_and_paste(
             cfg.clipboard_restore,
             cfg.request_timeout_sec,
             cfg.custom_terms.clone(),
+            cfg.punctuation_mode.clone(),
+            cfg.auto_space_zh_en,
         )
     };
 
@@ -159,6 +161,9 @@ pub async fn transcribe_and_paste(
             .map_err(|e| format!("序列化自定义术语失败: {}", e))?;
         form = form.text("custom_terms", terms_json);
     }
+    // 传递标点模式和中英空格设置
+    form = form.text("punctuation_mode", punctuation_mode);
+    form = form.text("auto_space_zh_en", if auto_space { "true" } else { "false" });
 
     let url = format!("{}/transcribe", server_url);
     let client = reqwest::Client::builder()
@@ -248,6 +253,7 @@ pub fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
 /// 保存配置。
 ///
 /// 保存后调用 `hotkey::restart_hotkey_listener` 应用新的快捷键配置（热重载）。
+/// 同时根据 `auto_start` 字段更新注册表开机自启项。
 #[tauri::command]
 pub fn save_config(app: AppHandle, state: State<'_, AppState>, config: AppConfig) -> Result<(), String> {
     let mut cfg = state
@@ -259,6 +265,12 @@ pub fn save_config(app: AppHandle, state: State<'_, AppState>, config: AppConfig
 
     // 热重载快捷键监听
     crate::hotkey::restart_hotkey_listener(app, cfg.clone());
+
+    // P2-05: 应用开机自启设置
+    let auto_start = cfg.auto_start;
+    if let Err(e) = crate::autostart::set_enabled(auto_start) {
+        log::warn!("设置开机自启失败: {}", e);
+    }
 
     Ok(())
 }
@@ -552,5 +564,85 @@ pub async fn cancel_download(state: State<'_, AppState>) -> Result<(), String> {
     }
 
     log::info!("模型下载已取消");
+    Ok(())
+}
+
+// ──────────────────────────────────────────────
+// 模型策略相关 commands (P1-06)
+// ──────────────────────────────────────────────
+
+/// 获取当前模型策略 (GET /model/strategy)。
+#[tauri::command]
+pub async fn get_model_strategy(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let (server_url, token) = {
+        let cfg = state
+            .config
+            .lock()
+            .map_err(|e| format!("锁配置失败: {}", e))?;
+        (cfg.server_url.clone(), cfg.token.clone().unwrap_or_default())
+    };
+
+    let url = format!("{}/model/strategy", server_url);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let resp = client
+        .get(&url)
+        .header("X-VoiceInput-Token", &token)
+        .send()
+        .await
+        .map_err(|e| format!("获取策略失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("获取策略返回错误: {}", resp.status()));
+    }
+
+    let result: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析策略失败: {}", e))?;
+
+    Ok(result)
+}
+
+/// 设置模型策略 (POST /model/strategy)。
+/// 同时更新本地配置中的 model_strategy 字段。
+#[tauri::command]
+pub async fn set_model_strategy(
+    state: State<'_, AppState>,
+    strategy: String,
+) -> Result<(), String> {
+    let (server_url, token) = {
+        let mut cfg = state
+            .config
+            .lock()
+            .map_err(|e| format!("锁配置失败: {}", e))?;
+        cfg.model_strategy = strategy.clone();
+        let _ = crate::config::save_config(&cfg);
+        (cfg.server_url.clone(), cfg.token.clone().unwrap_or_default())
+    };
+
+    let url = format!("{}/model/strategy", server_url);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let resp = client
+        .post(&url)
+        .header("X-VoiceInput-Token", &token)
+        .json(&serde_json::json!({ "strategy": strategy }))
+        .send()
+        .await
+        .map_err(|e| format!("设置策略失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("设置策略返回错误: {}", body));
+    }
+
+    log::info!("模型策略已设置为: {}", strategy);
     Ok(())
 }

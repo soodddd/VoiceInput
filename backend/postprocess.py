@@ -132,3 +132,97 @@ def apply_custom_term_corrections(
             text = text.replace(wrong, correct)
 
     return text
+
+
+# ── P2-06: Punctuation modes ──────────────────────────────────────
+
+
+def apply_punctuation_mode(text: str, mode: str = "simple") -> str:
+    """Apply punctuation processing based on the selected *mode*.
+
+    Parameters
+    ----------
+    text : str
+        The transcription text after term corrections.
+    mode : str
+        One of:
+        * ``"raw"``          — return text as-is, no punctuation changes.
+        * ``"simple"``       — ensure text ends with a period if no
+          terminal punctuation is present; normalize spacing.
+        * ``"input_method"`` — strip most punctuation for short input
+          scenarios (chat, search boxes); keep only essential commas.
+
+    Returns
+    -------
+    str
+        The text with punctuation adjustments applied.
+    """
+    if not text:
+        return text
+
+    if mode == "raw":
+        return text
+
+    if mode == "input_method":
+        # 移除句末标点（。.!?！？），保留逗号、顿号等中间标点
+        text = re.sub(r"[。.!?！？]+$", "", text)
+        # 移除句末多余空格
+        return text.rstrip()
+
+    # mode == "simple"
+    # 如果文本末尾没有终止标点，补充句号
+    stripped = text.rstrip()
+    if stripped and stripped[-1] not in "。.!?！？；;":
+        # 中文文本加句号，英文文本加句点
+        if re.search(r"[\u4e00-\u9fff]", stripped):
+            text = stripped + "。"
+        else:
+            text = stripped + "."
+    return text
+
+
+# ── P2-07: Chinese-English spacing ────────────────────────────────
+
+# 中英文边界：中文字符与 ASCII 字母数字之间
+_ZH_EN_BOUNDARY = re.compile(
+    r"([\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff])([A-Za-z0-9])"
+)
+_EN_ZH_BOUNDARY = re.compile(
+    r"([A-Za-z0-9])([\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff])"
+)
+
+
+def apply_zh_en_spacing(text: str, enabled: bool = True) -> str:
+    """Insert a space between adjacent Chinese and English characters.
+
+    Examples
+    --------
+    >>> apply_zh_en_spacing("用Python写代码")
+    '用 Python 写代码'
+    >>> apply_zh_en_spacing("hello世界")
+    'hello 世界'
+
+    Parameters
+    ----------
+    text : str
+        Input transcription text.
+    enabled : bool
+        If ``False``, return text unchanged.
+    """
+    if not text or not enabled:
+        return text
+
+    # 中→英边界加空格
+    text = _ZH_EN_BOUNDARY.sub(r"\1 \2", text)
+    # 英→中边界加空格
+    text = _EN_ZH_BOUNDARY.sub(r"\1 \2", text)
+
+    # 避免标点前后的多余空格
+    text = re.sub(r"\s+([，。！？；：、,\.!?;:])", r"\1", text)
+    text = re.sub(r"([（(\[【「『])\s+", r"\1", text)
+    text = re.sub(r"\s+([）)\]】」』])", r"\1", text)
+
+    # 合并连续空格
+    text = re.sub(r" {2,}", " ", text)
+
+    return text.strip()

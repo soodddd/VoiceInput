@@ -44,8 +44,22 @@ pub struct AppConfig {
     pub server_url: String,
     /// 模型路径（None = 使用默认路径）
     pub model_path: Option<String>,
-    /// 模型策略: "fast" / "balanced" / "accurate"
+    /// 模型策略: "fast" / "balanced" / "accurate" / "memory"
     pub model_strategy: String,
+
+    /// ── P2 功能字段 ──
+    /// P2-05: 开机自启
+    #[serde(default)]
+    pub auto_start: bool,
+    /// P2-06: 标点模式: "raw"（原始输出）/ "simple"（简单标点）/ "input_method"（输入法模式）
+    #[serde(default = "default_punctuation_mode")]
+    pub punctuation_mode: String,
+    /// P2-07: 中英混排自动加空格
+    #[serde(default = "default_true")]
+    pub auto_space_zh_en: bool,
+    /// P2-02: VAD 语音活动检测（静音自动停止）
+    #[serde(default = "default_true")]
+    pub vad_enabled: bool,
 
     /// ── 运行时字段（不写入 default_config.json 模板）──
     /// 鉴权 token，首次启动自动生成
@@ -57,6 +71,16 @@ pub struct AppConfig {
     /// 用户自定义术语词典（ASR误识别 → 正确文本）
     #[serde(default)]
     pub custom_terms: HashMap<String, String>,
+}
+
+/// 默认标点模式
+fn default_punctuation_mode() -> String {
+    "simple".to_string()
+}
+
+/// 默认 true
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -79,6 +103,10 @@ impl Default for AppConfig {
             server_url: "http://127.0.0.1:8765".to_string(),
             model_path: None,
             model_strategy: "balanced".to_string(),
+            auto_start: false,
+            punctuation_mode: "simple".to_string(),
+            auto_space_zh_en: true,
+            vad_enabled: true,
             token: None,
             input_device_name: None,
             custom_terms: HashMap::new(),

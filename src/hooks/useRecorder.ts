@@ -225,6 +225,15 @@ export function useRecorder(language: Language): UseRecorderReturn {
         })
       );
 
+      // P2-02: VAD 静音自动停止
+      unlistenFns.push(
+        await listen('vad-silence-detected', () => {
+          if (statusRef.current === 'recording') {
+            void doStopRecording();
+          }
+        })
+      );
+
       unlistenFns.push(
         await listen<number>('audio-level', (event) => {
           handleAudioLevel(event.payload);

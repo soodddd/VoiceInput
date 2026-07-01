@@ -16,8 +16,23 @@ import { useSettings } from '../hooks/useSettings';
 import { HotkeyCapture } from './HotkeyCapture';
 import { Toast } from './Toast';
 import { RefreshIcon } from './Icons';
-import { getDevices, startRecording, stopRecording } from '../utils/api';
+import { getDevices, startRecording, stopRecording, setModelStrategy } from '../utils/api';
 import type { AudioDevice } from '../types';
+
+/** 模型策略选项 */
+const MODEL_STRATEGIES = [
+  { value: 'balanced', label: '平衡模式（空闲 30 分钟释放）' },
+  { value: 'fast', label: '性能优先（常驻显存）' },
+  { value: 'memory', label: '省显存（每次识别后释放）' },
+  { value: 'accurate', label: '质量优先（最大精度）' },
+];
+
+/** 标点模式选项 */
+const PUNCTUATION_MODES = [
+  { value: 'raw', label: '原始输出' },
+  { value: 'simple', label: '简单标点（自动补充）' },
+  { value: 'input_method', label: '输入法模式（减少标点）' },
+];
 
 /** SettingsDialog 组件 Props */
 interface SettingsDialogProps {
@@ -515,6 +530,76 @@ export function SettingsDialog({ onSave, onCancel }: SettingsDialogProps): JSX.E
                 }
                 className="w-32"
                 style={{ accentColor: '#3478F6' }}
+              />
+            </SettingRow>
+
+            <div className="my-2" style={{ borderTop: '1px solid #F2F2F7' }} />
+
+            <SettingRow
+              label="模型策略"
+              hint="控制模型加载/释放策略，影响显存占用和响应速度"
+            >
+              <select
+                value={config.model_strategy}
+                onChange={(e) => {
+                  updateConfig('model_strategy', e.target.value);
+                  void setModelStrategy(e.target.value).catch(() => {});
+                }}
+                className="max-w-[200px] rounded-lg border px-3 py-2 text-sm"
+                style={{ borderColor: '#E5E5EA', color: '#1D1D1F' }}
+              >
+                {MODEL_STRATEGIES.map((s) => (
+                  <option key={s.value} value={s.value}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+            </SettingRow>
+
+            <div className="my-2" style={{ borderTop: '1px solid #F2F2F7' }} />
+
+            <SettingRow
+              label="标点模式"
+              hint="控制识别结果中的标点符号处理方式"
+            >
+              <select
+                value={config.punctuation_mode}
+                onChange={(e) => updateConfig('punctuation_mode', e.target.value)}
+                className="max-w-[200px] rounded-lg border px-3 py-2 text-sm"
+                style={{ borderColor: '#E5E5EA', color: '#1D1D1F' }}
+              >
+                {PUNCTUATION_MODES.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </SettingRow>
+
+            <div className="my-2" style={{ borderTop: '1px solid #F2F2F7' }} />
+
+            <SettingRow label="中英自动空格" hint="在中文和英文之间自动添加空格，改善排版">
+              <Toggle
+                checked={config.auto_space_zh_en}
+                onChange={(v) => updateConfig('auto_space_zh_en', v)}
+              />
+            </SettingRow>
+
+            <div className="my-2" style={{ borderTop: '1px solid #F2F2F7' }} />
+
+            <SettingRow label="VAD 静音自动停止" hint="检测到持续静音 2 秒后自动停止录音">
+              <Toggle
+                checked={config.vad_enabled}
+                onChange={(v) => updateConfig('vad_enabled', v)}
+              />
+            </SettingRow>
+
+            <div className="my-2" style={{ borderTop: '1px solid #F2F2F7' }} />
+
+            <SettingRow label="开机自启" hint="Windows 开机后自动启动 VoiceInput">
+              <Toggle
+                checked={config.auto_start}
+                onChange={(v) => updateConfig('auto_start', v)}
               />
             </SettingRow>
           </div>

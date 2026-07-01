@@ -45,7 +45,13 @@ import config
 import model_manager
 from asr_engine import engine_instance
 from audio_utils import chunk_audio, load_and_preprocess
-from postprocess import apply_custom_term_corrections, apply_term_corrections, clean_transcription
+from postprocess import (
+    apply_custom_term_corrections,
+    apply_punctuation_mode,
+    apply_term_corrections,
+    apply_zh_en_spacing,
+    clean_transcription,
+)
 
 # ── Logging ────────────────────────────────────────────────────────
 
@@ -71,6 +77,7 @@ class ModelStatusResponse(BaseModel):
     loaded: bool
     downloading: bool
     download_progress: float
+    strategy: str | None = None
 
 
 class ModelLoadRequest(BaseModel):
@@ -198,7 +205,53 @@ async def model_status(
         loaded=engine_instance.is_loaded,
         downloading=bool(dl_status["downloading"]),
         download_progress=float(dl_status["progress"]),
+        strategy=config.MODEL_STRATEGY,
     )
+
+
+class StrategyRequest(BaseModel):
+    strategy: str  # "fast" | "balanced" | "accurate" | "memory"
+
+
+@app.get("/model/strategy")
+async def get_strategy(
+    _token: None = Depends(verify_token),
+) -> dict:
+    """Return the current model inference strategy."""
+    return {
+        "strategy": config.MODEL_STRATEGY,
+        "available": list(config.STRATEGY_PARAMS.keys()),
+    }
+
+
+@app.post("/model/strategy")
+async def set_strategy(
+    req: StrategyRequest,
+    _token: None = Depends(verify_token),
+) -> dict:
+    """Set the model inference strategy.
+
+    If the model is currently loaded it will be unloaded so that the
+    next load uses the new strategy parameters (batch size, token
+    limit, idle timeout).
+    """
+    if req.strategy not in config.STRATEGY_PARAMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown strategy '{req.strategy}'. "
+            f"Available: {list(config.STRATEGY_PARAMS.keys())}",
+        )
+
+    old = config.MODEL_STRATEGY
+    config.MODEL_STRATEGY = req.strategy
+    logger.info("Model strategy changed: %s -> %s", old, req.strategy)
+
+    # 如果模型已加载且策略发生变化，卸载模型以便下次加载使用新参数
+    if old != req.strategy and engine_instance.is_loaded:
+        logger.info("Unloading model to apply new strategy on next load")
+        engine_instance.unload()
+
+    return {"status": "ok", "strategy": req.strategy}
 
 
 @app.post("/model/load", response_model=ModelLoadResponse)
@@ -303,6 +356,8 @@ async def transcribe(
     audio: UploadFile = File(...),
     language: str | None = Form(None),
     custom_terms: str | None = Form(None),
+    punctuation_mode: str = Form("simple"),
+    auto_space_zh_en: str = Form("true"),
     _token: None = Depends(verify_token),
 ) -> TranscribeResponse:
     """Transcribe an uploaded WAV file.
@@ -384,7 +439,7 @@ async def transcribe(
             if lang_i:
                 all_langs.append(lang_i)
 
-        # 5. Merge → clean → term-correct
+        # 5. Merge → clean → term-correct → punctuation → spacing
         merged_text = " ".join(all_texts)
         merged_text = clean_transcription(merged_text)
         merged_text = apply_term_corrections(merged_text)
@@ -396,6 +451,13 @@ async def transcribe(
                 merged_text = apply_custom_term_corrections(merged_text, terms_dict)
             except (json.JSONDecodeError, TypeError):
                 logger.warning("Failed to parse custom_terms JSON")
+
+        # P2-06: 标点模式处理
+        merged_text = apply_punctuation_mode(merged_text, mode=punctuation_mode)
+
+        # P2-07: 中英混排自动空格
+        space_enabled = auto_space_zh_en.lower() in ("true", "1", "yes")
+        merged_text = apply_zh_en_spacing(merged_text, enabled=space_enabled)
 
         # Determine dominant language
         if all_langs:
@@ -412,6 +474,11 @@ async def transcribe(
             n_chunks,
             merged_text[:200],
         )
+
+        # 省显存策略：每次识别完成后立即释放模型
+        if engine_instance.should_unload_after_use and engine_instance.is_loaded:
+            logger.info("Memory strategy: unloading model after transcription")
+            engine_instance.unload()
 
         return TranscribeResponse(
             text=merged_text,
