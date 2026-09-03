@@ -33,4 +33,6 @@ VoiceInput is a privacy-first Windows voice input tool. It records from a microp
 
 The complete onedir ZIP is about 2.73 GB and is not attached to this GitHub release. Build it with `build_release_zip.ps1` or use an external large-file release store. Always extract the package as a whole and keep `asr_backend/_internal` beside `asr_backend.exe`.
 
+Validated local package SHA256: `5743354396898B2FB02F5D55FD26532C245F8933944617562C06D8DD20F1D6B2`.
+
 This remains a preview release. Speech quality and automatic input behavior can vary by microphone, GPU driver, permissions and target application.

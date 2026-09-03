@@ -1,7 +1,7 @@
 # VoiceInput 全量代码审查与修复记录
 
 日期：2026-09-03  
-当前主线：E:\ASK\voice-input-v2（v0.1.3-preview）  
+当前主线：E:\ASK\voice-input-v2（v0.1.3-preview）
 历史原型：E:\ASK\voice-input（只保留回溯，不再作为交付主线）
 
 ## 项目结论
