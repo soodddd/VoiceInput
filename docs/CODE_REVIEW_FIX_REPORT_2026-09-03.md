@@ -1,7 +1,7 @@
 # VoiceInput 全量代码审查与修复记录
 
 日期：2026-09-03  
-当前主线：E:\ASK\voice-input-v2  
+当前主线：E:\ASK\voice-input-v2（v0.1.3-preview）  
 历史原型：E:\ASK\voice-input（只保留回溯，不再作为交付主线）
 
 ## 项目结论
@@ -62,7 +62,7 @@
 - build_backend.bat：onedir 后端构建通过，`asr_backend.exe` 与 `_internal` 均生成。
 - build_release_zip.ps1：已完成 ZIP、新鲜解压、清单和新鲜后端 `/health` 冒烟测试；
   ZIP 大小约 2.73 GB；最终 SHA256 为
-  `777BDBF030131F0586DE9E9214DCC6C3E33513B3D27F1C214F9E6CCB48964887`。
+  `5743354396898B2FB02F5D55FD26532C245F8933944617562C06D8DD20F1D6B2`。
 - ModelScope 公共模型下载约 1.88 GB；本机 RTX 4060 上模型加载、CUDA 显存分配和卸载均通过。
 - 最终 EXE 现场启动成功，模型引导界面显示约 1.9 GB；选择本地模型目录后，
   前一版现场实例已成功加载 GPU 并进入悬浮主界面。

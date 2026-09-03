@@ -1,10 +1,10 @@
 # VoiceInput
 
-**v0.1.2-preview · Windows 本地语音输入**
+**v0.1.3-preview · Windows 本地语音输入**
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-[最新 Release](../../releases/tag/v0.1.2-preview) | [完整修复报告](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md) | [发布说明](./docs/RELEASE_NOTES_v0.1.2-preview.md)
+[最新 Release](../../releases/tag/v0.1.3-preview) | [完整修复报告](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md) | [发布说明](./docs/RELEASE_NOTES_v0.1.3-preview.md)
 
 > ⚠️ **预览版本（Preview）** — 这是用于测试和反馈的早期预览版本，正式版发布前可能有 bug 和变动。
 
@@ -66,7 +66,7 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 ### 第一步：下载
 
 1. 打开 [发布页面](../../releases)
-2. 下载名字叫 `VoiceInput-v0.1.2-preview-win64.zip` 的文件
+2. 下载名字叫 `VoiceInput-v0.1.3-preview-win64.zip` 的文件
 
 ### 第二步：解压
 
@@ -234,7 +234,7 @@ npm run tauri -- build
 powershell -ExecutionPolicy Bypass -File .\build_release_zip.ps1
 ```
 
-发布的 zip 输出到 `.\release\VoiceInput-v0.1.2-preview-win64.zip`。
+发布的 zip 输出到 `.\release\VoiceInput-v0.1.3-preview-win64.zip`。
 
 > **打包说明** — 后端使用 onedir 运行时（包含 torch 与 transformers，约 2.7 GB），避免每次启动都解压超大单文件。项目使用 ZIP 分发，必须让 `asr_backend/_internal` 与 `asr_backend.exe` 保持原有相对位置。
 
@@ -295,7 +295,9 @@ MIT — 见 [LICENSE](./LICENSE)。
 
 ## 更新日志
 
-### v0.1.2-preview（最新版本）
+### v0.1.3-preview（最新版本）
+
+本版本是一次完整的稳定性、隐私和发布流程升级：补齐本地 GPU 推理、录音、模型管理、自动输入、错误恢复和 onedir 发布链路，并完成本机验证。
 
 **新增功能：**
 - 📋 **单实例锁** — 防止同时运行两个程序，避免端口冲突

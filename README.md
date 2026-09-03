@@ -1,10 +1,10 @@
 # VoiceInput
 
-**v0.1.2-preview · Windows Local Voice Input**
+**v0.1.3-preview · Windows Local Voice Input**
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-[Latest Release](../../releases/tag/v0.1.2-preview) | [Fix and validation report](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md) | [Release notes](./docs/RELEASE_NOTES_v0.1.2-preview.md)
+[Latest Release](../../releases/tag/v0.1.3-preview) | [Fix and validation report](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md) | [Release notes](./docs/RELEASE_NOTES_v0.1.3-preview.md)
 
 > ⚠️ **Preview Release** — This is an early preview version for testing and feedback. Expect bugs and breaking changes before the stable release.
 
@@ -66,7 +66,7 @@ It works in most standard text fields — Word, chat boxes, and browser search b
 ### Step 1: Download
 
 1. Go to the [Releases page](../../releases)
-2. Download the file named `VoiceInput-v0.1.2-preview-win64.zip`
+2. Download the file named `VoiceInput-v0.1.3-preview-win64.zip`
 
 ### Step 2: Extract
 
@@ -234,7 +234,7 @@ npm run tauri -- build
 powershell -ExecutionPolicy Bypass -File .\build_release_zip.ps1
 ```
 
-The release zip is output to `.\release\VoiceInput-v0.1.2-preview-win64.zip`.
+The release zip is output to `.\release\VoiceInput-v0.1.3-preview-win64.zip`.
 
 > **Packaging note** — The backend is an onedir runtime (~2.7 GB including torch and transformers) to avoid unpacking a giant executable on every launch. The project ships a ZIP; keep the complete `asr_backend/_internal` directory beside `asr_backend.exe`.
 
@@ -295,7 +295,9 @@ MIT — see [LICENSE](./LICENSE).
 
 ## Changelog
 
-### v0.1.2-preview (Latest)
+### v0.1.3-preview (Latest)
+
+This release is a full stability, privacy, and distribution upgrade covering local GPU inference, recording, model lifecycle, safe text entry, recovery, and onedir packaging, with local validation completed.
 
 **New Features:**
 - 📋 **Single instance lock** — Prevents running two copies at once

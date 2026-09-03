@@ -77,7 +77,7 @@ def main(argv: list[str] | None = None) -> None:
         stream=sys.stdout,
     )
     logger = logging.getLogger("asr_backend")
-    logger.info("Starting VoiceInput ASR backend v0.1.2")
+    logger.info("Starting VoiceInput ASR backend v0.1.3")
 
     # Import after logging is configured so init messages are captured
     import config
