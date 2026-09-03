@@ -4,9 +4,19 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
+[最新 Release](../../releases/tag/v0.1.2-preview) | [完整修复报告](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md) | [发布说明](./docs/RELEASE_NOTES_v0.1.2-preview.md)
+
 > ⚠️ **预览版本（Preview）** — 这是用于测试和反馈的早期预览版本，正式版发布前可能有 bug 和变动。
 
 一个注重隐私的、完全本地运行的 Windows 语音输入工具。对着麦克风说话，你的话就会自动出现在光标所在的位置——不需要打字。语音识别完全在你的显卡上通过 [Qwen3-ASR](https://github.com/QwenLM/Qwen3) 完成，**你的语音数据绝对不会离开你的电脑**。
+
+这是一个 Windows 桌面端预览项目，采用 React + Tauri + Rust + Python 分层设计。桌面端负责录音、快捷键和安全输入，Python 后端只监听本机随机回环端口，模型运行在本地 NVIDIA GPU 上。
+
+### 当前状态
+
+- ✅ 源码、测试、桌面端和 onedir 后端已完成构建
+- ✅ 本机 NVIDIA GPU、Qwen3-ASR 模型加载、麦克风录音链路已验证
+- ⚠️ 当前为 Preview；不同电脑上的真实中文/英文识别和目标程序输入仍需用户现场确认
 
 ---
 
@@ -19,7 +29,7 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 3. **松开** `Alt+V` 键
 4. 你说的话就会**自动变成文字**，出现在光标闪动的地方！
 
-它在**任何能打字的地方都能用**——Word、微信聊天框、浏览器搜索框、游戏里，到处都行。而且因为它完全在你自己的电脑上运行，没有任何人能听到你的录音。
+它适用于大多数标准文本输入框——Word、聊天框、浏览器搜索框等。某些管理员权限窗口、游戏或自绘输入框可能会拦截自动输入，需要单独验证。
 
 ---
 
@@ -34,7 +44,6 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 - 🖥️ **系统托盘** — 快速访问设置、日志和退出
 - ⚡ **VAD 静音停止** — 检测到静音自动停止录音
 - 📋 **安全输入** — 自动返回原光标窗口并输入文字，不修改图片、文件或文本剪贴板
-- 🔄 **更新检查** — 有新版本时自动提醒你
 
 ---
 
@@ -160,6 +169,13 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 
 ---
 
+## 已知边界
+
+- 仅支持 Windows 10 1903+ / Windows 11 和 NVIDIA CUDA GPU；不提供 CPU、AMD 或 Intel GPU 推理路径。
+- 模型首次下载约 1.9 GB；发布 ZIP 约 2.7 GB，二者需要分别准备磁盘空间。
+- 自动输入依赖目标程序接受 Windows 输入事件；管理员窗口、自绘控件和部分游戏可能拒绝输入。
+- 仓库不提交编译产物和模型缓存；请从 Releases 下载完整运行包，并保留 `asr_backend/_internal`。
+
 ## 常见问题
 
 ### 程序打不开 / 打开马上就关了
@@ -212,7 +228,7 @@ python -m pip install pyinstaller==6.22.1
 .\build_backend.bat
 
 # 4. 构建 Tauri 主程序
-npm run tauri build -- --no-bundle
+npm run tauri -- build
 
 # 5. 构建并从全新解压目录验证发布 zip
 powershell -ExecutionPolicy Bypass -File .\build_release_zip.ps1
@@ -230,7 +246,7 @@ powershell -ExecutionPolicy Bypass -File .\build_release_zip.ps1
 voiceinput.exe (Tauri/Rust)  ──启动──▶  asr_backend.exe (Python/FastAPI)
         │                                        │
         ├─ cpal（录音）                          ├─ Qwen3-ASR-0.6B（GPU 推理）
-        ├─ enigo（粘贴模拟）                     ├─ uvicorn（HTTP 服务 127.0.0.1:8765）
+        ├─ Windows SendInput（安全输入）          ├─ uvicorn（随机 127.0.0.1 端口）
         ├─ rdev（全局快捷键）                    └─ postprocess（术语纠正）
         └─ React 18（悬浮窗 UI）
 ```
@@ -282,8 +298,8 @@ MIT — 见 [LICENSE](./LICENSE)。
 ### v0.1.2-preview（最新版本）
 
 **新增功能：**
-- 🔄 **更新检查** — 启动时自动检查 GitHub 是否有新版本
 - 📋 **单实例锁** — 防止同时运行两个程序，避免端口冲突
+- 🔒 **本地回环通信** — 后端使用随机端口和每次运行的新 token
 
 **体验改进：**
 - 💬 **友好的错误提示** — 错误信息现在显示清晰的中文说明（比如"找不到麦克风"而不是看不懂的错误代码）

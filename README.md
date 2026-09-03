@@ -4,9 +4,19 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
+[Latest Release](../../releases/tag/v0.1.2-preview) | [Fix and validation report](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md) | [Release notes](./docs/RELEASE_NOTES_v0.1.2-preview.md)
+
 > ⚠️ **Preview Release** — This is an early preview version for testing and feedback. Expect bugs and breaking changes before the stable release.
 
 A privacy-first, fully-local voice input tool for Windows. Speak into your microphone and your words appear wherever your cursor is — no typing needed. Speech recognition runs entirely on your GPU via [Qwen3-ASR](https://github.com/QwenLM/Qwen3), so **no audio ever leaves your computer**.
+
+This is a Windows desktop preview built with React, Tauri, Rust, and Python. The desktop layer handles recording, hotkeys, and safe text entry; the Python service listens only on a random local loopback port and runs the model on a local NVIDIA GPU.
+
+### Current status
+
+- ✅ Source, tests, desktop app, and the onedir backend build successfully
+- ✅ Local NVIDIA GPU, Qwen3-ASR model loading, and microphone recording have been verified
+- ⚠️ Preview release: real speech recognition and target-application input still need confirmation on the target machine
 
 ---
 
@@ -19,7 +29,7 @@ VoiceInput is like having a friend who types everything you say. Instead of usin
 3. **Let go** of the key
 4. Your words **magically appear** where your cursor is blinking!
 
-It works in **any program** — Word, WeChat, browser search boxes, games, anywhere you can type. And because it runs 100% on your own computer, nobody can listen to your recordings.
+It works in most standard text fields — Word, chat boxes, and browser search bars. Some elevated windows, games, and custom-drawn controls may block simulated input and need separate validation.
 
 ---
 
@@ -34,7 +44,6 @@ It works in **any program** — Word, WeChat, browser search boxes, games, anywh
 - 🖥️ **System tray** — Quick access to settings, logs, and quit
 - ⚡ **VAD auto-stop** — Detects silence and stops recording automatically
 - 📋 **Clipboard-safe input** — Returns to the prior window and types without altering clipboard data
-- 🔄 **Update check** — Notifies you when a new version is available
 
 ---
 
@@ -160,6 +169,13 @@ Add custom word corrections. For example, if the AI always mishears your name "X
 
 ---
 
+## Known boundaries
+
+- Windows 10 1903+ / Windows 11 and an NVIDIA CUDA GPU are required; CPU, AMD, and Intel GPU inference are not supported.
+- The model download is about 1.9 GB; the release ZIP is about 2.7 GB, so plan for both separately.
+- Automatic entry depends on the target application accepting Windows input events; elevated windows, custom controls, and some games may reject it.
+- Compiled binaries and model caches are not committed to the repository. Download the complete release package and keep `asr_backend/_internal` beside the backend executable.
+
 ## Troubleshooting
 
 ### The app won't start / closes immediately
@@ -212,7 +228,7 @@ python -m pip install pyinstaller==6.22.1
 .\build_backend.bat
 
 # 4. Build the Tauri executable
-npm run tauri build -- --no-bundle
+npm run tauri -- build
 
 # 5. Build and fresh-extraction validate the release zip
 powershell -ExecutionPolicy Bypass -File .\build_release_zip.ps1
@@ -230,7 +246,7 @@ The release zip is output to `.\release\VoiceInput-v0.1.2-preview-win64.zip`.
 voiceinput.exe (Tauri/Rust)  ──spawn──▶  asr_backend.exe (Python/FastAPI)
         │                                        │
         ├─ cpal (audio capture)                  ├─ Qwen3-ASR-0.6B (GPU inference)
-        ├─ enigo (paste simulation)              ├─ uvicorn (HTTP server on 127.0.0.1:8765)
+        ├─ Windows SendInput (safe text entry)   ├─ uvicorn (random 127.0.0.1 port)
         ├─ rdev (global hotkeys)                 └─ postprocess (term correction)
         └─ React 18 (floating UI)
 ```
@@ -282,8 +298,8 @@ MIT — see [LICENSE](./LICENSE).
 ### v0.1.2-preview (Latest)
 
 **New Features:**
-- 🔄 **Update check** — App now checks GitHub for new versions on startup
 - 📋 **Single instance lock** — Prevents running two copies at once
+- 🔒 **Local loopback transport** — Uses a random port and a fresh token per run
 
 **Improvements:**
 - 💬 **Friendly error messages** — Errors now show clear Chinese explanations (e.g., "microphone not found" instead of raw error codes)
