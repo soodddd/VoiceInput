@@ -15,50 +15,12 @@ import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { useBackend } from './hooks/useBackend';
 import { useSettings } from './hooks/useSettings';
 import { useRecorder } from './hooks/useRecorder';
-import { loadModel, unloadModel } from './utils/api';
+import { loadModel, unloadModel, saveConfig } from './utils/api';
 import { FloatingWindow } from './components/FloatingWindow';
 import { SettingsDialog } from './components/SettingsDialog';
 import { ModelDownload } from './components/ModelDownload';
 import { LoadingIcon } from './components/Icons';
 import type { AppView, Language } from './types';
-
-/** 当前版本号（与 package.json / Cargo.toml 保持一致） */
-const CURRENT_VERSION = '0.1.2';
-/** GitHub 仓库地址（用于更新检查） */
-const GITHUB_REPO = 'soodddd/VoiceInput';
-
-/**
- * 启动时检查 GitHub 是否有新版本发布。
- * 如果有新版本，通过对话框提示用户前往下载。
- * 检查失败时静默忽略，不影响正常使用。
- */
-async function checkForUpdates(): Promise<void> {
-  try {
-    const resp = await fetch(
-      `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
-      { signal: AbortSignal.timeout(8000) }
-    );
-    if (!resp.ok) return;
-    const data = await resp.json();
-    const tagName: string = data.tag_name || '';
-    // 解析 tag，格式如 "v0.1.3-preview"
-    const latestVersion = tagName.replace(/^v/, '').replace(/-preview$/, '');
-    if (latestVersion && latestVersion > CURRENT_VERSION) {
-      const { message, confirm } = await import('@tauri-apps/plugin-dialog');
-      const confirmed = await confirm(
-        `发现新版本 ${tagName}！\n\n当前版本：v${CURRENT_VERSION}\n新版本包含改进和修复。\n\n是否前往下载新版本？`,
-        { title: '发现新版本', kind: 'info', okLabel: '前往下载', cancelLabel: '稍后再说' }
-      );
-      if (confirmed) {
-        await message(`请在浏览器中打开：\nhttps://github.com/${GITHUB_REPO}/releases/latest`, {
-          title: '下载地址',
-        });
-      }
-    }
-  } catch {
-    // 网络错误或超时，静默忽略
-  }
-}
 
 const LANGUAGE_CYCLE: Language[] = ['auto', 'Chinese', 'English'];
 
@@ -80,16 +42,33 @@ const FLOATING_RECORDING_HEIGHT = 240;
 const FLOATING_ERROR_HEIGHT = 260;
 
 function App(): JSX.Element {
-  const { backendReady, loading, modelStatus, refreshModelStatus } = useBackend();
+  const {
+    backendReady,
+    loading,
+    modelStatus,
+    refreshModelStatus,
+    refreshBackend,
+  } = useBackend();
   const { config, updateConfig, reloadConfig } = useSettings();
 
   const [view, setView] = useState<AppView>('waiting');
   const [prevView, setPrevView] = useState<AppView>('floating');
-  const autoLoadTriedRef = useRef(false);
+  const [backendWaitExpired, setBackendWaitExpired] = useState(false);
+  const [backendRetryAttempt, setBackendRetryAttempt] = useState(0);
   const sizeAppliedRef = useRef<AppView | null>(null);
 
   const language = (config.language as Language) || 'auto';
-  const recorder = useRecorder(language);
+  const recorder = useRecorder(language, backendReady && modelStatus.loaded);
+  const setRecorderError = recorder.setError;
+
+  useEffect(() => {
+    if (backendReady) {
+      setBackendWaitExpired(false);
+      return;
+    }
+    const timer = setTimeout(() => setBackendWaitExpired(true), 45_000);
+    return () => clearTimeout(timer);
+  }, [backendReady, backendRetryAttempt]);
 
   // 根据视图和录音状态动态调整窗口大小
   useEffect(() => {
@@ -134,28 +113,13 @@ function App(): JSX.Element {
     sizeAppliedRef.current = 'floating';
   }, [view, recorder.status, recorder.resultText]);
 
-  // 后端就绪后自动尝试加载模型（仅首次）
-  useEffect(() => {
-    if (backendReady && !modelStatus.loaded && !autoLoadTriedRef.current) {
-      autoLoadTriedRef.current = true;
-      loadModel()
-        .then(() => refreshModelStatus())
-        .catch(() => {});
-    }
-  }, [backendReady, modelStatus.loaded, refreshModelStatus]);
-
-  // 启动后延迟检查更新（避免与启动流程竞争）
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      void checkForUpdates();
-    }, 8000);
-    return () => clearTimeout(timer);
-  }, []);
-
   // 语言切换
   const handleLanguageChange = useCallback((lang: Language) => {
     updateConfig('language', lang);
-  }, [updateConfig]);
+    void saveConfig({ ...config, language: lang }).catch(() => {
+      setRecorderError('语言设置保存失败，请重试');
+    });
+  }, [config, updateConfig, setRecorderError]);
 
   // 根据后端/模型状态自动切换视图
   useEffect(() => {
@@ -164,7 +128,7 @@ function App(): JSX.Element {
       return;
     }
     if (!backendReady) {
-      setView('waiting');
+      setView(backendWaitExpired ? 'error' : 'waiting');
       return;
     }
     if (modelStatus.loaded) {
@@ -172,56 +136,56 @@ function App(): JSX.Element {
     } else {
       setView((current) => (current === 'settings' ? 'settings' : 'download'));
     }
-  }, [backendReady, loading, modelStatus.loaded]);
+  }, [backendReady, backendWaitExpired, loading, modelStatus.loaded]);
 
   // 全局事件监听
   useEffect(() => {
     const unlistenFns: UnlistenFn[] = [];
+    let cancelled = false;
+    const register = async (
+      event: string,
+      handler: Parameters<typeof listen>[1],
+    ): Promise<void> => {
+      const unlisten = await listen(event, handler);
+      if (cancelled) unlisten(); else unlistenFns.push(unlisten);
+    };
 
     const setupListeners = async (): Promise<void> => {
-      unlistenFns.push(
-        await listen('open-settings', () => {
+      await register('open-settings', () => {
           setPrevView((v) => (v === 'settings' ? 'floating' : v));
           setView('settings');
-        })
-      );
+      });
 
-      unlistenFns.push(
-        await listen<string>('set-language', (event) => {
+      const unlistenLanguage = await listen<string>('set-language', (event) => {
           const lang = event.payload as Language;
           if (LANGUAGE_CYCLE.includes(lang)) {
-            updateConfig('language', lang);
+            handleLanguageChange(lang);
           }
-        })
-      );
+      });
+      if (cancelled) unlistenLanguage(); else unlistenFns.push(unlistenLanguage);
 
-      unlistenFns.push(
-        await listen('language-cycle', () => {
+      await register('language-cycle', () => {
           const idx = LANGUAGE_CYCLE.indexOf(language);
           const next = LANGUAGE_CYCLE[(idx + 1) % LANGUAGE_CYCLE.length];
-          updateConfig('language', next);
-        })
-      );
+          handleLanguageChange(next);
+      });
 
-      unlistenFns.push(
-        await listen('load-model', () => {
+      await register('load-model', () => {
           void loadModel().then(() => void refreshModelStatus());
-        })
-      );
+      });
 
-      unlistenFns.push(
-        await listen('unload-model', () => {
+      await register('unload-model', () => {
           void unloadModel().then(() => void refreshModelStatus());
-        })
-      );
+      });
     };
 
     void setupListeners();
 
     return () => {
+      cancelled = true;
       unlistenFns.forEach((fn) => fn());
     };
-  }, [language, updateConfig, refreshModelStatus]);
+  }, [language, handleLanguageChange, refreshModelStatus]);
 
   const handleOpenSettings = useCallback(() => {
     setPrevView(view === 'settings' ? 'floating' : view);
@@ -263,6 +227,38 @@ function App(): JSX.Element {
     );
   }
 
+  if (view === 'error') {
+    return (
+      <div
+        className="flex h-screen w-screen flex-col items-center justify-center px-5 text-center"
+        style={{
+          backgroundColor: '#FFFFFF',
+          borderRadius: '14px',
+          border: '1px solid rgba(0,0,0,0.08)',
+        }}
+      >
+        <p className="text-sm font-semibold" style={{ color: '#DC2626' }}>
+          本地语音服务启动失败
+        </p>
+        <p className="mt-2 text-xs" style={{ color: '#64748B' }}>
+          请确认完整运行包中的 asr_backend/_internal 未被移动或删除。
+        </p>
+        <button
+          type="button"
+          className="mt-3 rounded-lg px-4 py-2 text-xs font-medium text-white"
+          style={{ backgroundColor: '#2563EB' }}
+          onClick={() => {
+            setBackendWaitExpired(false);
+            setBackendRetryAttempt((attempt) => attempt + 1);
+            void refreshBackend();
+          }}
+        >
+          重新检查
+        </button>
+      </div>
+    );
+  }
+
   // 设置面板
   if (view === 'settings') {
     return (
@@ -282,7 +278,10 @@ function App(): JSX.Element {
         className="h-screen w-screen"
         style={{ backgroundColor: '#F5F5F7', borderRadius: '12px', overflow: 'hidden' }}
       >
-        <ModelDownload onModelLoaded={handleModelLoaded} />
+        <ModelDownload
+          onModelLoaded={handleModelLoaded}
+          existingModelPath={modelStatus.model_path}
+        />
       </div>
     );
   }

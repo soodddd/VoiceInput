@@ -1,5 +1,9 @@
 # VoiceInput v2 — 系统架构设计文档
 
+> 本文是历史设计基线，文中的勾选项不等同于当前机器上的重新验收。
+> 2026-09-03 修复后的实现与验证边界见
+> [CODE_REVIEW_FIX_REPORT_2026-09-03.md](CODE_REVIEW_FIX_REPORT_2026-09-03.md)。
+
 > **版本**：v2.0  
 > **日期**：2026-07-09  
 > **作者**：高见远（架构师）  
@@ -1416,7 +1420,7 @@ src/styles/floating-window.css      # 悬浮窗专用样式
    - 快捷键捕获：`HotkeyCapture.tsx` 组件，点击后捕获键盘输入
 
 6. **`ModelDownload.tsx`**：
-   - 欢迎引导界面：告知用户需要下载模型（~1.2 GB）
+   - 欢迎引导界面：告知用户需要下载模型（~1.9 GB）
    - 下载源选择：ModelScope（推荐）/ HuggingFace / 本地路径
    - 进度条：监听后端 SSE 事件，显示百分比/速度/剩余时间
    - 下载失败重试按钮
@@ -1600,7 +1604,7 @@ pyinstaller>=6.5.0          # 打包为 exe
 
 > **PyTorch CUDA 安装说明**：PyTorch GPU 版需通过官方渠道安装，不能直接 `pip install torch`：
 > ```bash
-> pip install torch --index-url https://download.pytorch.org/whl/cu121
+> pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
 > ```
 
 ---

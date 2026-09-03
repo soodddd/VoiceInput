@@ -38,7 +38,7 @@ interface UseRecorderReturn {
  *
  * @param language 当前识别语言
  */
-export function useRecorder(language: Language): UseRecorderReturn {
+export function useRecorder(language: Language, enabled = true): UseRecorderReturn {
   const [status, setStatus] = useState<AppStatus>('idle');
   const [resultText, setResultText] = useState('');
   const [volumeLevel, setVolumeLevel] = useState(0);
@@ -46,10 +46,12 @@ export function useRecorder(language: Language): UseRecorderReturn {
   const [errorMessage, setErrorMessage] = useState('');
 
   const languageRef = useRef(language);
+  const enabledRef = useRef(enabled);
   const statusRef = useRef<AppStatus>('idle');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const decayTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mountedRef = useRef(true);
+  const operationRef = useRef<'idle' | 'starting' | 'recording' | 'stopping'>('idle');
 
   /**
    * 将后端/系统错误信息转换为用户友好的中文提示。
@@ -109,6 +111,10 @@ export function useRecorder(language: Language): UseRecorderReturn {
   }, [language]);
 
   useEffect(() => {
+    enabledRef.current = enabled;
+  }, [enabled]);
+
+  useEffect(() => {
     statusRef.current = status;
   }, [status]);
 
@@ -150,11 +156,16 @@ export function useRecorder(language: Language): UseRecorderReturn {
 
   /** 内部：执行录音开始逻辑（供事件和手动调用共用） */
   const doStartRecording = useCallback(async () => {
-    if (statusRef.current !== 'idle' && statusRef.current !== 'result' && statusRef.current !== 'error') {
+    if (!enabledRef.current) {
       return;
     }
+    if (operationRef.current !== 'idle') {
+      return;
+    }
+    operationRef.current = 'starting';
     try {
       await invokeStartRecording();
+      operationRef.current = 'recording';
       if (mountedRef.current) {
         setStatus('recording');
         setErrorMessage('');
@@ -162,6 +173,7 @@ export function useRecorder(language: Language): UseRecorderReturn {
         startTimer();
       }
     } catch (err) {
+      operationRef.current = 'idle';
       if (mountedRef.current) {
         setStatus('error');
         setErrorMessage(friendlyErrorMessage(err, 'start'));
@@ -171,9 +183,10 @@ export function useRecorder(language: Language): UseRecorderReturn {
 
   /** 内部：执行录音停止+识别+粘贴逻辑（供事件和手动调用共用） */
   const doStopRecording = useCallback(async () => {
-    if (statusRef.current !== 'recording') {
+    if (operationRef.current !== 'recording') {
       return;
     }
+    operationRef.current = 'stopping';
     stopTimer();
     if (mountedRef.current) {
       setStatus('processing');
@@ -190,10 +203,10 @@ export function useRecorder(language: Language): UseRecorderReturn {
         return;
       }
 
-      const text = await invokeTranscribeAndPaste(wav, languageRef.current);
+      const outcome = await invokeTranscribeAndPaste(wav, languageRef.current);
 
       if (mountedRef.current) {
-        const trimmed = (text || '').trim();
+        const trimmed = (outcome.text || '').trim();
         if (!trimmed) {
           setResultText('');
           setStatus('error');
@@ -201,6 +214,9 @@ export function useRecorder(language: Language): UseRecorderReturn {
         } else {
           setResultText(trimmed);
           setStatus('result');
+          setErrorMessage(outcome.paste_error
+            ? `识别成功，但自动输入失败：${outcome.paste_error}`
+            : '');
         }
       }
     } catch (err) {
@@ -208,26 +224,14 @@ export function useRecorder(language: Language): UseRecorderReturn {
         setStatus('error');
         setErrorMessage(friendlyErrorMessage(err, 'stop'));
       }
+    } finally {
+      operationRef.current = 'idle';
     }
   }, [stopTimer, startDecay, friendlyErrorMessage]);
 
   const handleAudioLevel = useCallback((level: number) => {
     if (mountedRef.current) {
       setVolumeLevel(Math.max(0, Math.min(1, level)));
-    }
-  }, []);
-
-  const handleTranscribeResult = useCallback((text: string) => {
-    if (mountedRef.current) {
-      const trimmed = (text || '').trim();
-      if (!trimmed) {
-        setResultText('');
-        setStatus('error');
-        setErrorMessage('未检测到语音，请重试');
-      } else {
-        setResultText(trimmed);
-        setStatus('result');
-      }
     }
   }, []);
 
@@ -261,44 +265,49 @@ export function useRecorder(language: Language): UseRecorderReturn {
     mountedRef.current = true;
     const unlistenFns: UnlistenFn[] = [];
 
+    let cancelled = false;
+    const register = async (
+      event: string,
+      handler: Parameters<typeof listen>[1],
+    ): Promise<void> => {
+      const unlisten = await listen(event, handler);
+      if (cancelled) {
+        unlisten();
+      } else {
+        unlistenFns.push(unlisten);
+      }
+    };
     const setupListeners = async (): Promise<void> => {
-      unlistenFns.push(
-        await listen('recording-start', () => {
+      await register('recording-start', () => {
           void doStartRecording();
-        })
-      );
+      });
 
-      unlistenFns.push(
-        await listen('recording-stop', () => {
+      await register('recording-stop', () => {
           void doStopRecording();
-        })
-      );
+      });
 
       // P2-02: VAD 静音自动停止
-      unlistenFns.push(
-        await listen('vad-silence-detected', () => {
-          if (statusRef.current === 'recording') {
+      await register('vad-silence-detected', () => {
+          if (operationRef.current === 'recording') {
             void doStopRecording();
           }
-        })
-      );
+      });
 
-      unlistenFns.push(
-        await listen<number>('audio-level', (event) => {
-          handleAudioLevel(event.payload);
-        })
-      );
-
-      unlistenFns.push(
-        await listen<string>('transcribe-result', (event) => {
-          handleTranscribeResult(event.payload);
-        })
-      );
+      await register('recording-max-duration', () => {
+        if (operationRef.current === 'recording') {
+          void doStopRecording();
+        }
+      });
+      const unlistenAudio = await listen<number>('audio-level', (event) => {
+        handleAudioLevel(event.payload);
+      });
+      if (cancelled) unlistenAudio(); else unlistenFns.push(unlistenAudio);
     };
 
     void setupListeners();
 
     return () => {
+      cancelled = true;
       mountedRef.current = false;
       unlistenFns.forEach((fn) => fn());
       if (timerRef.current !== null) {
@@ -308,7 +317,7 @@ export function useRecorder(language: Language): UseRecorderReturn {
         clearInterval(decayTimerRef.current);
       }
     };
-  }, [doStartRecording, doStopRecording, handleAudioLevel, handleTranscribeResult]);
+  }, [doStartRecording, doStopRecording, handleAudioLevel]);
 
   return {
     status,

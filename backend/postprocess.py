@@ -13,6 +13,42 @@ import re
 
 logger = logging.getLogger(__name__)
 
+
+def merge_transcription_chunks(texts: list[str], max_overlap_chars: int = 80) -> str:
+    """Merge overlapping ASR chunks without repeating boundary text.
+
+    The audio chunker intentionally keeps a short overlap.  ASR commonly
+    emits the same suffix/prefix for both chunks; a plain ``" ".join`` makes
+    users see duplicated words.  This function removes the longest exact
+    boundary overlap while remaining conservative when no overlap is found.
+    """
+    merged = ""
+    for raw in texts:
+        current = clean_transcription(raw)
+        if not current:
+            continue
+        if not merged:
+            merged = current
+            continue
+
+        limit = min(max_overlap_chars, len(merged), len(current))
+        overlap = 0
+        for size in range(limit, 1, -1):
+            if merged[-size:].casefold() == current[:size].casefold():
+                overlap = size
+                break
+
+        remainder = current[overlap:].lstrip()
+        if not remainder:
+            continue
+        separator = ""
+        if merged[-1:].isascii() and remainder[:1].isascii():
+            if merged[-1:].isalnum() and remainder[:1].isalnum():
+                separator = " "
+        merged = f"{merged}{separator}{remainder}"
+
+    return clean_transcription(merged)
+
 # ── Term correction dictionary ─────────────────────────────────────
 #
 # Keys are common phonetic misrecognitions produced by Qwen3-ASR when

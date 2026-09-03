@@ -4,7 +4,7 @@
 //! 使用 std::process::Command 管理子进程，Windows 下隐藏控制台窗口。
 
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Python 后端进程管理器。
 ///
@@ -135,54 +135,49 @@ impl BackendManager {
 
     /// 查找 asr_backend.exe 的位置。
     ///
-    /// 查找顺序：
-    /// 1. 可执行文件同级目录的 binaries/ 子目录
-    /// 2. 当前工作目录
-    /// 3. PATH 环境变量
+    /// Only trusted application/development directories are searched.  Falling
+    /// back to PATH could execute an unrelated program with the same name.
     fn find_backend_exe(&self, exe_name: &str) -> Result<std::path::PathBuf, String> {
-        // 1. 检查可执行文件同级的 binaries 目录
+        let mut candidates = Vec::new();
         if let Ok(exe_dir) = std::env::current_exe() {
             if let Some(parent) = exe_dir.parent() {
-                let candidate = parent.join("binaries").join(exe_name);
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
-                // 也检查同级目录
-                let candidate2 = parent.join(exe_name);
-                if candidate2.exists() {
-                    return Ok(candidate2);
-                }
+                candidates.push(parent.join("asr_backend").join(exe_name));
+                candidates.push(parent.join("binaries").join("asr_backend").join(exe_name));
+                candidates.push(parent.join(exe_name));
             }
         }
-
-        // 2. 当前工作目录
-        let candidate = std::path::PathBuf::from(exe_name);
-        if candidate.exists() {
-            return Ok(candidate);
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        candidates.push(manifest.join("binaries").join("asr_backend").join(exe_name));
+        for candidate in candidates {
+            if candidate.is_file() {
+                return candidate
+                    .canonicalize()
+                    .map_err(|e| format!("无法解析后端路径: {}", e));
+            }
         }
-
-        // 3. 让系统在 PATH 中查找
-        Ok(std::path::PathBuf::from(exe_name))
+        Err("找不到受信任的 ASR 后端，请重新安装完整运行包".to_string())
     }
 
     /// 检查后端进程是否存活。
     ///
     /// 通过尝试 waitpid(non-blocking) 判断子进程状态。
     pub fn is_alive(&mut self) -> bool {
-        if let Some(child) = self.child.as_mut() {
-            match child.try_wait() {
-                Ok(None) => true,  // 仍在运行
-                Ok(Some(_status)) => {
-                    log::warn!("后端进程已退出");
-                    false
-                }
-                Err(e) => {
-                    log::error!("检查后端进程状态失败: {}", e);
-                    false
-                }
+        let status = match self.child.as_mut() {
+            Some(child) => child.try_wait(),
+            None => return false,
+        };
+        match status {
+            Ok(None) => true,
+            Ok(Some(exit_status)) => {
+                log::warn!("后端进程已退出: {}", exit_status);
+                self.child = None;
+                false
             }
-        } else {
-            false
+            Err(e) => {
+                log::error!("检查后端进程状态失败: {}", e);
+                self.child = None;
+                false
+            }
         }
     }
 
@@ -223,40 +218,13 @@ impl BackendManager {
 
     /// 重启后端进程。
     ///
-    /// 先 stop 再 start，启动后等待健康检查通过。
+    /// 先 stop 再 start；健康监控线程会在后续周期确认 HTTP 健康状态。
     pub fn restart(&mut self) -> Result<(), String> {
         log::info!("重启后端进程...");
         self.stop()?;
         // 短暂等待端口释放
         std::thread::sleep(Duration::from_millis(500));
-        self.start()?;
-        // 等待健康检查通过
-        self.wait_for_health(Duration::from_secs(30))
-    }
-
-    /// 等待后端健康检查通过（GET /health 返回 200）。
-    ///
-    /// 超时时间由参数指定。
-    pub fn wait_for_health(&self, timeout: Duration) -> Result<(), String> {
-        let start = Instant::now();
-        let health_url = format!("{}/health", self.server_url);
-
-        log::info!("等待后端健康检查: {}", health_url);
-
-        while start.elapsed() < timeout {
-            if let Ok(response) = reqwest::blocking::get(&health_url) {
-                if response.status().is_success() {
-                    log::info!("后端健康检查通过 ({:.1}s)", start.elapsed().as_secs_f64());
-                    return Ok(());
-                }
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-
-        Err(format!(
-            "后端健康检查超时 ({}s)",
-            timeout.as_secs()
-        ))
+        self.start()
     }
 }
 

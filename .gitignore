@@ -15,6 +15,7 @@ src-tauri/gen/
 
 # ── Python sidecar 二进制（关键！2.7GB，禁止推送）──
 src-tauri/binaries/*.exe
+src-tauri/binaries/asr_backend/
 # 保留 .gitkeep 以维持目录结构
 !src-tauri/binaries/.gitkeep
 
@@ -53,7 +54,7 @@ Desktop.ini
 ehthumbs.db
 
 # ── 临时测试文件（根目录）──
-test_*.py
+/test_*.py
 test_*.cjs
 test_*.wav
 test_*.png

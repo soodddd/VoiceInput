@@ -20,9 +20,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # Tauri 2 核心框架
 tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-shell = "2"
 tauri-plugin-clipboard-manager = "2"
-tauri-plugin-store = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 

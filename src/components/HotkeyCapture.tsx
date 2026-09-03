@@ -71,12 +71,16 @@ function eventToHotkey(event: KeyboardEvent): string | null {
     // 单个字符直接小写
     if (key.length === 1) {
       keyName = key.toLowerCase();
-    } else {
-      // F1-F12 等功能键直接小写
+    } else if (/^F([1-9]|1[0-2])$/.test(key)) {
       keyName = key.toLowerCase();
+    } else {
+      return null;
     }
   }
 
+  if (parts.length === 0) {
+    return null;
+  }
   parts.push(keyName);
   return parts.join('+');
 }

@@ -5,7 +5,7 @@
  * 1. 麦克风：设备下拉 + 测试按钮 + 结果显示
  * 2. 快捷键：录音快捷键捕获 + 语言快捷键捕获
  * 3. 音频：采样率 + 归一化 + 裁剪静音 + 静音阈值
- * 4. 高级：服务器地址 + 粘贴延迟 + 恢复剪贴板 + 最大录音时长 + 请求超时
+ * 4. 高级：本机服务状态 + 输入延迟 + 最大录音时长 + 请求超时
  *
  * 底部 [保存] [取消] 按钮，保存时调 invoke('save_config', {config})。
  */
@@ -16,7 +16,7 @@ import { useSettings } from '../hooks/useSettings';
 import { HotkeyCapture } from './HotkeyCapture';
 import { Toast } from './Toast';
 import { RefreshIcon } from './Icons';
-import { getDevices, startRecording, stopRecording, setModelStrategy } from '../utils/api';
+import { getDevices, startRecording, stopRecording } from '../utils/api';
 import type { AudioDevice } from '../types';
 
 /** 模型策略选项 */
@@ -119,7 +119,7 @@ function SettingRow({
  * 设置面板组件
  */
 export function SettingsDialog({ onSave, onCancel }: SettingsDialogProps): JSX.Element {
-  const { config, updateConfig, saveSettings, loading } = useSettings();
+  const { config, updateConfig, updateConfigBatch, saveSettings, loading } = useSettings();
   const [activeTab, setActiveTab] = useState<TabKey>('microphone');
   const [toastMessage, setToastMessage] = useState('');
   const [devices, setDevices] = useState<AudioDevice[]>([]);
@@ -151,12 +151,17 @@ export function SettingsDialog({ onSave, onCancel }: SettingsDialogProps): JSX.E
     setTesting(true);
     setTestResult('');
     maxLevelRef.current = 0;
+    let started = false;
+    let unlistenFn: (() => void) | null = null;
+    let failed = false;
 
     try {
-      await startRecording();
+      const selected = devices.find((item) => item.index === config.input_device);
+      await startRecording(config.input_device, selected?.name ?? config.input_device_name);
+      started = true;
 
       // 监听 audio-level 事件 2 秒
-      const unlistenFn = await listen<number>('audio-level', (event) => {
+      unlistenFn = await listen<number>('audio-level', (event) => {
         if (event.payload > maxLevelRef.current) {
           maxLevelRef.current = event.payload;
         }
@@ -165,28 +170,27 @@ export function SettingsDialog({ onSave, onCancel }: SettingsDialogProps): JSX.E
       // 等待 2 秒
       await new Promise<void>((resolve) => setTimeout(resolve, 2000));
 
-      // 停止录音
-      try {
-        await stopRecording();
-      } catch {
-        // 忽略停止录音错误
+    } catch {
+      failed = true;
+    } finally {
+      if (started) {
+        try {
+          await stopRecording();
+        } catch {
+          failed = true;
+        }
       }
-
-      unlistenFn();
-
-      const maxLevel = maxLevelRef.current;
-      if (maxLevel > 0.01) {
-        const percent = Math.round(maxLevel * 100);
-        setTestResult(`麦克风正常，音量 ${percent}%`);
+      unlistenFn?.();
+      if (failed) {
+        setTestResult('麦克风测试失败，请检查设备');
+      } else if (maxLevelRef.current > 0.01) {
+        setTestResult(`麦克风正常，音量 ${Math.round(maxLevelRef.current * 100)}%`);
       } else {
         setTestResult('未检测到声音，请检查麦克风连接');
       }
-    } catch {
-      setTestResult('麦克风测试失败，请检查设备');
-    } finally {
       setTesting(false);
     }
-  }, []);
+  }, [config.input_device, config.input_device_name, devices]);
 
   /** 保存配置 */
   const handleSave = useCallback(async () => {
@@ -299,7 +303,11 @@ export function SettingsDialog({ onSave, onCancel }: SettingsDialogProps): JSX.E
                 value={config.input_device === null ? -1 : config.input_device}
                 onChange={(e) => {
                   const val = parseInt(e.target.value, 10);
-                  updateConfig('input_device', val === -1 ? null : val);
+                  const selected = devices.find((item) => item.index === val);
+                  updateConfigBatch({
+                    input_device: val === -1 ? null : val,
+                    input_device_name: selected?.name ?? null,
+                  });
                 }}
                 className="max-w-[200px] rounded-lg border px-3 py-2 text-sm"
                 style={{
@@ -434,7 +442,7 @@ export function SettingsDialog({ onSave, onCancel }: SettingsDialogProps): JSX.E
             >
               <input
                 type="range"
-                min={-100}
+                min={-80}
                 max={-10}
                 step={1}
                 value={config.silence_threshold_db}
@@ -451,24 +459,17 @@ export function SettingsDialog({ onSave, onCancel }: SettingsDialogProps): JSX.E
         {/* Tab 4: 高级 */}
         {activeTab === 'advanced' && (
           <div className="py-4">
-            <SettingRow label="服务器地址" hint="ASR 后端地址，通常不需要修改">
-              <input
-                type="text"
-                value={config.server_url}
-                onChange={(e) => updateConfig('server_url', e.target.value)}
-                className="w-44 rounded-lg border px-3 py-2 text-sm"
-                style={{
-                  borderColor: '#E5E5EA',
-                  color: '#1D1D1F',
-                }}
-              />
+            <SettingRow label="识别服务" hint="仅连接本机随机端口，语音不会发往远程服务器">
+              <span className="text-sm font-medium" style={{ color: '#34C759' }}>
+                本机安全模式
+              </span>
             </SettingRow>
 
             <div className="my-2" style={{ borderTop: '1px solid #F2F2F7' }} />
 
             <SettingRow
               label="粘贴延迟"
-              hint={`写入剪贴板后等待多久再粘贴（当前: ${config.paste_delay_ms} ms）`}
+              hint={`切回原输入窗口后等待多久再输入（当前: ${config.paste_delay_ms} ms）`}
             >
               <input
                 type="range"
@@ -481,15 +482,6 @@ export function SettingsDialog({ onSave, onCancel }: SettingsDialogProps): JSX.E
                 }
                 className="w-32"
                 style={{ accentColor: '#3478F6' }}
-              />
-            </SettingRow>
-
-            <div className="my-2" style={{ borderTop: '1px solid #F2F2F7' }} />
-
-            <SettingRow label="恢复剪贴板" hint="粘贴后恢复原来的剪贴板内容">
-              <Toggle
-                checked={config.clipboard_restore}
-                onChange={(v) => updateConfig('clipboard_restore', v)}
               />
             </SettingRow>
 
@@ -541,10 +533,7 @@ export function SettingsDialog({ onSave, onCancel }: SettingsDialogProps): JSX.E
             >
               <select
                 value={config.model_strategy}
-                onChange={(e) => {
-                  updateConfig('model_strategy', e.target.value);
-                  void setModelStrategy(e.target.value).catch(() => {});
-                }}
+                onChange={(e) => updateConfig('model_strategy', e.target.value)}
                 className="max-w-[200px] rounded-lg border px-3 py-2 text-sm"
                 style={{ borderColor: '#E5E5EA', color: '#1D1D1F' }}
               >

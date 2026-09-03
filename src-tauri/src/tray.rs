@@ -160,6 +160,15 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         }
         MENU_QUIT => {
             log::info!("用户点击退出，应用即将关闭");
+            if let Some(state) = app.try_state::<crate::AppState>() {
+                state
+                    .shutting_down
+                    .store(true, std::sync::atomic::Ordering::Release);
+                crate::hotkey::stop_hotkey_listener();
+                if let Ok(mut backend) = state.backend.lock() {
+                    let _ = backend.stop();
+                }
+            }
             app.exit(0);
         }
         MENU_VIEW_LOGS => {

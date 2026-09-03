@@ -17,8 +17,6 @@
     "core:window:allow-is-visible",
     "core:window:allow-is-focused",
     "clipboard-manager:allow-write-text",
-    "clipboard-manager:allow-read-text",
-    "shell:allow-execute",
-    "shell:allow-open"
+    "dialog:default"
   ]
 }

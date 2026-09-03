@@ -6,11 +6,21 @@
 
 use crate::config::AppConfig;
 use crate::paste;
-use crate::recorder::AudioDeviceInfo;
+use crate::recorder::{AudioDeviceInfo, RecordingOptions};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
+
+struct BusyGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 /// /transcribe 接口返回的 JSON 结构
 ///
@@ -32,19 +42,31 @@ pub struct TranscribeResponse {
     pub chunks: serde_json::Value,
 }
 
+#[derive(Debug, Serialize)]
+pub struct TranscribeOutcome {
+    pub text: String,
+    pub paste_error: Option<String>,
+}
+
 /// /model/status 接口返回的 JSON 结构
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ModelStatus {
     #[serde(default)]
     pub loaded: bool,
     #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub model_path: Option<String>,
+    #[serde(default)]
     pub downloading: bool,
     #[serde(default)]
     pub download_progress: f64,
     #[serde(default)]
-    pub model_name: String,
+    pub download_state: String,
     #[serde(default)]
-    pub device: String,
+    pub download_message: String,
+    #[serde(default)]
+    pub download_error: Option<String>,
     #[serde(default)]
     pub strategy: Option<String>,
 }
@@ -53,11 +75,17 @@ pub struct ModelStatus {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DownloadStatus {
     #[serde(default)]
+    pub state: String,
+    #[serde(default)]
     pub downloading: bool,
     #[serde(default)]
     pub progress: f64,
     #[serde(default)]
-    pub message: Option<String>,
+    pub speed: f64,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub message: String,
 }
 
 // ──────────────────────────────────────────────
@@ -66,20 +94,42 @@ pub struct DownloadStatus {
 
 /// 开始录音。
 #[tauri::command]
-pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let (sample_rate, device, vad_enabled) = {
+pub fn start_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    device: Option<i32>,
+    device_name: Option<String>,
+) -> Result<(), String> {
+    if state.asr_busy.load(Ordering::Acquire) {
+        return Err("正在识别上一段语音，请稍候".to_string());
+    }
+    let (sample_rate, device, device_name, vad_enabled, max_record_sec, silence_db) = {
         let cfg = state
             .config
             .lock()
             .map_err(|e| format!("锁配置失败: {}", e))?;
-        (cfg.sample_rate, cfg.input_device, cfg.vad_enabled)
+        (
+            cfg.sample_rate,
+            device.or(cfg.input_device),
+            device_name.or_else(|| cfg.input_device_name.clone()),
+            cfg.vad_enabled,
+            cfg.max_record_sec,
+            cfg.silence_threshold_db,
+        )
     };
 
     let mut recorder = state
         .recorder
         .lock()
         .map_err(|e| format!("锁录音器失败: {}", e))?;
-    recorder.start(app, device, sample_rate, vad_enabled).map_err(|e| {
+    recorder.start(app, RecordingOptions {
+        device_index: device,
+        device_name,
+        target_sample_rate: sample_rate,
+        vad_enabled,
+        max_record_sec,
+        silence_threshold_db: silence_db,
+    }).map_err(|e| {
         log::error!("开始录音失败: {}", e);
         e
     })
@@ -113,8 +163,25 @@ pub async fn transcribe_and_paste(
     wav: Vec<u8>,
     language: Option<String>,
     custom_terms: Option<HashMap<String, String>>,
-) -> Result<String, String> {
-    let (server_url, token, paste_delay, clipboard_restore, timeout_sec, config_terms, punctuation_mode, auto_space) = {
+) -> Result<TranscribeOutcome, String> {
+    state
+        .asr_busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| "已有识别请求正在处理".to_string())?;
+    let _busy_guard = BusyGuard(Arc::clone(&state.asr_busy));
+    let (
+        server_url,
+        token,
+        paste_delay,
+        timeout_sec,
+        config_terms,
+        punctuation_mode,
+        auto_space,
+        normalize_audio,
+        trim_silence,
+        silence_threshold_db,
+        max_record_sec,
+    ) = {
         let cfg = state
             .config
             .lock()
@@ -123,11 +190,14 @@ pub async fn transcribe_and_paste(
             cfg.server_url.clone(),
             cfg.token.clone().unwrap_or_default(),
             cfg.paste_delay_ms,
-            cfg.clipboard_restore,
             cfg.request_timeout_sec,
             cfg.custom_terms.clone(),
             cfg.punctuation_mode.clone(),
             cfg.auto_space_zh_en,
+            cfg.normalize_audio,
+            cfg.trim_silence,
+            cfg.silence_threshold_db,
+            cfg.max_record_sec,
         )
     };
 
@@ -164,6 +234,16 @@ pub async fn transcribe_and_paste(
     // 传递标点模式和中英空格设置
     form = form.text("punctuation_mode", punctuation_mode);
     form = form.text("auto_space_zh_en", if auto_space { "true" } else { "false" });
+    form = form.text(
+        "normalize_audio",
+        if normalize_audio { "true" } else { "false" },
+    );
+    form = form.text(
+        "trim_silence",
+        if trim_silence { "true" } else { "false" },
+    );
+    form = form.text("silence_threshold_db", silence_threshold_db.to_string());
+    form = form.text("max_record_sec", max_record_sec.to_string());
 
     let url = format!("{}/transcribe", server_url);
     let client = reqwest::Client::builder()
@@ -191,24 +271,28 @@ pub async fn transcribe_and_paste(
         .map_err(|e| format!("解析转录结果失败: {}", e))?;
 
     log::info!(
-        "转录完成: text='{}' (耗时 {}ms, 音频 {}ms)",
-        result.text,
+        "转录完成: {} 字符 (耗时 {}ms, 音频 {}ms)",
+        result.text.chars().count(),
         result.process_ms,
         result.duration_ms
     );
 
-    // 粘贴文本
-    if !result.text.is_empty() {
-        paste::paste_text(result.text.clone(), paste_delay, clipboard_restore).map_err(|e| {
+    // Always publish/return recognition before attempting input injection, so
+    // a focus or permission failure never loses the recognised text.
+    let _ = app.emit("transcribe-result", &result.text);
+    let paste_error = if !result.text.is_empty() {
+        paste::paste_text(result.text.clone(), paste_delay).err().map(|e| {
             log::error!("粘贴失败: {}", e);
             e
-        })?;
-    }
+        })
+    } else {
+        None
+    };
 
-    // emit 事件
-    let _ = app.emit("transcribe-result", &result.text);
-
-    Ok(result.text)
+    Ok(TranscribeOutcome {
+        text: result.text,
+        paste_error,
+    })
 }
 
 /// 粘贴指定文本（写剪贴板 + 模拟 Ctrl+V）。
@@ -216,15 +300,15 @@ pub async fn transcribe_and_paste(
 /// 用于前端在不经过转录流程的情况下手动粘贴文本。
 #[tauri::command]
 pub fn paste_text(state: State<'_, AppState>, text: String) -> Result<(), String> {
-    let (paste_delay_ms, clipboard_restore) = {
+    let paste_delay_ms = {
         let cfg = state
             .config
             .lock()
             .map_err(|e| format!("锁配置失败: {}", e))?;
-        (cfg.paste_delay_ms, cfg.clipboard_restore)
+        cfg.paste_delay_ms
     };
 
-    paste::paste_text(text, paste_delay_ms, clipboard_restore).map_err(|e| {
+    paste::paste_text(text, paste_delay_ms).map_err(|e| {
         log::error!("粘贴失败: {}", e);
         e
     })
@@ -255,21 +339,71 @@ pub fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
 /// 保存后调用 `hotkey::restart_hotkey_listener` 应用新的快捷键配置（热重载）。
 /// 同时根据 `auto_start` 字段更新注册表开机自启项。
 #[tauri::command]
-pub fn save_config(app: AppHandle, state: State<'_, AppState>, config: AppConfig) -> Result<(), String> {
-    let mut cfg = state
+pub async fn save_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mut config: AppConfig,
+) -> Result<(), String> {
+    crate::config::validate_config(&config).map_err(|e| e.to_string())?;
+    let old = state
         .config
         .lock()
-        .map_err(|e| format!("锁配置失败: {}", e))?;
-    *cfg = config;
-    crate::config::save_config(&cfg).map_err(|e| format!("{:?}", e))?;
+        .map_err(|e| format!("锁配置失败: {}", e))?
+        .clone();
+    let hotkeys_changed =
+        old.hotkey != config.hotkey || old.language_hotkey != config.language_hotkey;
+    let strategy_changed = old.model_strategy != config.model_strategy;
+    if strategy_changed
+        && (state.asr_busy.load(Ordering::Acquire)
+            || state
+                .recorder
+                .lock()
+                .map_err(|e| format!("锁录音器失败: {}", e))?
+                .is_recording())
+    {
+        return Err("录音或识别过程中不能切换模型策略".to_string());
+    }
+    // These values are process-owned and must not be accepted from WebView IPC.
+    config.server_url = old.server_url.clone();
+    config.token = old.token.clone();
 
-    // 热重载快捷键监听
-    crate::hotkey::restart_hotkey_listener(app, cfg.clone());
+    // Apply the backend strategy before committing the file. A rejected
+    // backend update therefore leaves the old configuration intact.
+    if strategy_changed {
+        let response = reqwest::Client::new()
+            .post(format!("{}/model/strategy", old.server_url))
+            .timeout(std::time::Duration::from_secs(180))
+            .header("X-VoiceInput-Token", old.token.unwrap_or_default())
+            .json(&serde_json::json!({ "strategy": config.model_strategy }))
+            .send()
+            .await
+            .map_err(|e| format!("应用模型策略失败: {}", e))?;
+        if !response.status().is_success() {
+            return Err(format!("应用模型策略失败: {}", response.status()));
+        }
+    }
+
+    crate::config::save_config(&config).map_err(|e| e.to_string())?;
+    {
+        let mut cfg = state
+            .config
+            .lock()
+            .map_err(|e| format!("锁配置失败: {}", e))?;
+        *cfg = config.clone();
+    }
+
+    if hotkeys_changed {
+        crate::hotkey::restart_hotkey_listener(app, config.clone());
+    }
 
     // P2-05: 应用开机自启设置
-    let auto_start = cfg.auto_start;
-    if let Err(e) = crate::autostart::set_enabled(auto_start) {
+    if let Err(e) = crate::autostart::set_enabled(config.auto_start) {
         log::warn!("设置开机自启失败: {}", e);
+    }
+    if strategy_changed {
+        if let Ok(mut backend) = state.backend.lock() {
+            backend.model_strategy = config.model_strategy;
+        }
     }
 
     Ok(())
@@ -377,6 +511,7 @@ pub async fn get_model_status(
 pub async fn download_model(
     state: State<'_, AppState>,
     source: Option<String>,
+    local_path: Option<String>,
 ) -> Result<(), String> {
     let (server_url, token) = {
         let cfg = state
@@ -396,9 +531,10 @@ pub async fn download_model(
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
 
     let mut req = client.post(&url).header("X-VoiceInput-Token", &token);
-    if let Some(src) = source {
-        req = req.json(&serde_json::json!({ "source": src }));
-    }
+    req = req.json(&serde_json::json!({
+        "source": source.unwrap_or_else(|| "modelscope".to_string()),
+        "local_path": local_path,
+    }));
 
     let resp = req
         .send()
@@ -419,6 +555,9 @@ pub async fn load_model(
     state: State<'_, AppState>,
     model_path: Option<String>,
 ) -> Result<(), String> {
+    if state.asr_busy.load(Ordering::Acquire) {
+        return Err("识别过程中不能重新加载模型".to_string());
+    }
     let (server_url, token) = {
         let cfg = state
             .config
@@ -460,6 +599,15 @@ pub async fn load_model(
 /// 卸载模型 (POST /model/unload)。
 #[tauri::command]
 pub async fn unload_model(state: State<'_, AppState>) -> Result<(), String> {
+    if state.asr_busy.load(Ordering::Acquire)
+        || state
+            .recorder
+            .lock()
+            .map_err(|e| format!("锁录音器失败: {}", e))?
+            .is_recording()
+    {
+        return Err("录音或识别过程中不能释放模型".to_string());
+    }
     let (server_url, token) = {
         let cfg = state
             .config
@@ -584,7 +732,7 @@ pub async fn get_model_strategy(state: State<'_, AppState>) -> Result<serde_json
 
     let url = format!("{}/model/strategy", server_url);
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(180))
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
 
@@ -614,13 +762,17 @@ pub async fn set_model_strategy(
     state: State<'_, AppState>,
     strategy: String,
 ) -> Result<(), String> {
+    if state.asr_busy.load(Ordering::Acquire) {
+        return Err("识别过程中不能切换模型策略".to_string());
+    }
+    if !matches!(strategy.as_str(), "fast" | "balanced" | "accurate" | "memory") {
+        return Err("无效的模型策略".to_string());
+    }
     let (server_url, token) = {
-        let mut cfg = state
+        let cfg = state
             .config
             .lock()
             .map_err(|e| format!("锁配置失败: {}", e))?;
-        cfg.model_strategy = strategy.clone();
-        let _ = crate::config::save_config(&cfg);
         (cfg.server_url.clone(), cfg.token.clone().unwrap_or_default())
     };
 
@@ -643,6 +795,17 @@ pub async fn set_model_strategy(
         return Err(format!("设置策略返回错误: {}", body));
     }
 
+    {
+        let mut cfg = state
+            .config
+            .lock()
+            .map_err(|e| format!("锁配置失败: {}", e))?;
+        cfg.model_strategy = strategy.clone();
+        crate::config::save_config(&cfg).map_err(|e| e.to_string())?;
+    }
+    if let Ok(mut backend) = state.backend.lock() {
+        backend.model_strategy = strategy.clone();
+    }
     log::info!("模型策略已设置为: {}", strategy);
     Ok(())
 }

@@ -60,7 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--model-strategy",
         type=str,
         default="balanced",
-        choices=["fast", "balanced", "accurate"],
+        choices=["fast", "balanced", "accurate", "memory"],
         help="Model inference strategy (default: balanced).",
     )
     return parser.parse_args(argv)
@@ -77,7 +77,7 @@ def main(argv: list[str] | None = None) -> None:
         stream=sys.stdout,
     )
     logger = logging.getLogger("asr_backend")
-    logger.info("Starting VoiceInput ASR backend v2.0")
+    logger.info("Starting VoiceInput ASR backend v0.1.2")
 
     # Import after logging is configured so init messages are captured
     import config

@@ -32,10 +32,10 @@ export interface AppConfig {
   channels: number;
   /** 粘贴延迟（毫秒），默认 800 */
   paste_delay_ms: number;
-  /** 是否粘贴后恢复原剪贴板内容 */
-  clipboard_restore: boolean;
   /** 输入设备索引，null 表示系统默认 */
   input_device: number | null;
+  /** 设备稳定名称，优先于易变化的枚举索引 */
+  input_device_name: string | null;
   /** 是否启用音量归一化 */
   normalize_audio: boolean;
   /** 是否裁剪静音段 */
@@ -46,10 +46,6 @@ export interface AppConfig {
   max_record_sec: number;
   /** 请求超时（秒），默认 120 */
   request_timeout_sec: number;
-  /** ASR 后端地址，如 "http://127.0.0.1:8765" */
-  server_url: string;
-  /** 模型路径，null 表示使用默认路径 */
-  model_path: string | null;
   /** 模型策略："fast" | "balanced" | "accurate" | "memory" */
   model_strategy: string;
   /** P2-05: 开机自启 */
@@ -60,8 +56,6 @@ export interface AppConfig {
   auto_space_zh_en: boolean;
   /** P2-02: VAD 语音活动检测 */
   vad_enabled: boolean;
-  /** 本地安全 token */
-  token: string;
   /** 用户自定义术语词典（ASR误识别 → 正确文本） */
   custom_terms: Record<string, string>;
 }
@@ -70,18 +64,23 @@ export interface AppConfig {
 export interface ModelStatus {
   /** 模型是否已加载到显存 */
   loaded: boolean;
+  /** 本地是否存在完整模型 */
+  installed: boolean;
+  /** 当前发现的本地模型目录 */
+  model_path: string | null;
   /** 是否正在下载 */
   downloading: boolean;
   /** 下载进度（0-100） */
   download_progress: number;
-  /** 模型名称 */
-  model_name: string;
-  /** 推理设备，如 "cuda:0" */
-  device: string;
+  download_state: string;
+  download_message: string;
+  download_error: string | null;
+  strategy: string | null;
 }
 
 /** 下载状态（get_download_status 返回） */
 export interface DownloadStatus {
+  state: string;
   /** 是否正在下载 */
   downloading: boolean;
   /** 下载进度（0-100） */
@@ -90,6 +89,12 @@ export interface DownloadStatus {
   speed: number;
   /** 错误信息，null 表示无错误 */
   error: string | null;
+  message: string;
+}
+
+export interface TranscribeOutcome {
+  text: string;
+  paste_error: string | null;
 }
 
 /** 音频输入设备 */

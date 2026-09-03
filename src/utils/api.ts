@@ -6,15 +6,28 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import type { AppConfig, ModelStatus, DownloadStatus, AudioDevice } from '../types';
+import type {
+  AppConfig,
+  ModelStatus,
+  DownloadStatus,
+  AudioDevice,
+  TranscribeOutcome,
+} from '../types';
 
 /**
  * 开始录音
  * 调用 Rust 层 start_recording 命令，启动 cpal 麦克风输入流。
  */
-export async function startRecording(): Promise<void> {
-  await invoke('start_recording');
+export async function startRecording(
+  device?: number | null,
+  deviceName?: string | null,
+): Promise<void> {
+  await invoke('start_recording', {
+    device: device ?? null,
+    deviceName: deviceName ?? null,
+  });
 }
 
 /**
@@ -44,13 +57,12 @@ export async function transcribeAndPaste(
   wav: number[],
   language: string,
   customTerms?: Record<string, string>
-): Promise<string> {
+): Promise<TranscribeOutcome> {
   const payload: Record<string, unknown> = { wav, language };
   if (customTerms && Object.keys(customTerms).length > 0) {
-    payload.custom_terms = customTerms;
+    payload.customTerms = customTerms;
   }
-  const text = await invoke<string>('transcribe_and_paste', payload);
-  return text;
+  return invoke<TranscribeOutcome>('transcribe_and_paste', payload);
 }
 
 /**
@@ -115,16 +127,16 @@ export async function getModelStatus(): Promise<ModelStatus> {
  * 调用 Rust 层 download_model 命令，触发模型下载。
  * @param source 下载源："modelscope" | "huggingface" | "local"
  */
-export async function downloadModel(source: string): Promise<void> {
-  await invoke('download_model', { source });
+export async function downloadModel(source: string, localPath?: string): Promise<void> {
+  await invoke('download_model', { source, localPath: localPath ?? null });
 }
 
 /**
  * 加载模型到显存
  * 调用 Rust 层 load_model 命令，将模型加载到 GPU。
  */
-export async function loadModel(): Promise<void> {
-  await invoke('load_model');
+export async function loadModel(modelPath?: string): Promise<void> {
+  await invoke('load_model', { modelPath: modelPath ?? null });
 }
 
 /**
@@ -187,7 +199,6 @@ export async function getDevices(): Promise<AudioDevice[]> {
  * 使用 Tauri 窗口 API 隐藏窗口，不退出程序。
  */
 export async function hideWindow(): Promise<void> {
-  const { getCurrentWindow } = await import('@tauri-apps/api/window');
   const appWindow = getCurrentWindow();
   await appWindow.hide();
 }
@@ -197,7 +208,6 @@ export async function hideWindow(): Promise<void> {
  * 使用 Tauri 窗口 API 启动原生窗口拖拽。
  */
 export async function startDragging(): Promise<void> {
-  const { getCurrentWindow } = await import('@tauri-apps/api/window');
   const appWindow = getCurrentWindow();
   await appWindow.startDragging();
 }

@@ -23,6 +23,7 @@ import type { DownloadStatus } from '../types';
 interface ModelDownloadProps {
   /** 模型加载完成回调 */
   onModelLoaded: () => void;
+  existingModelPath: string | null;
 }
 
 /** 下载源选项 */
@@ -53,7 +54,7 @@ const DOWNLOAD_SOURCES: DownloadSource[] = [
 ];
 
 /** 下载状态枚举 */
-type DownloadPhase = 'idle' | 'downloading' | 'completed' | 'failed' | 'loading';
+type DownloadPhase = 'idle' | 'downloading' | 'cancelling' | 'completed' | 'failed' | 'loading';
 
 /**
  * 格式化下载速度
@@ -70,41 +71,59 @@ function formatSpeed(speed: number): string {
 /**
  * 模型下载引导界面
  */
-export function ModelDownload({ onModelLoaded }: ModelDownloadProps): JSX.Element {
+export function ModelDownload({
+  onModelLoaded,
+  existingModelPath,
+}: ModelDownloadProps): JSX.Element {
   const [selectedSource, setSelectedSource] = useState<string>('modelscope');
-  const [phase, setPhase] = useState<DownloadPhase>('idle');
+  const [phase, setPhase] = useState<DownloadPhase>(
+    existingModelPath ? 'completed' : 'idle',
+  );
   const [progress, setProgress] = useState(0);
   const [speed, setSpeed] = useState(0);
   const [errorMsg, setErrorMsg] = useState('');
   const [toastMessage, setToastMessage] = useState('');
   const mountedRef = useRef(true);
+  const pollInFlightRef = useRef(false);
+  const [statusMessage, setStatusMessage] = useState('');
 
   /** 轮询下载状态 */
   const pollDownloadStatus = useCallback(async () => {
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
     try {
       const status: DownloadStatus = await getDownloadStatus();
       if (!mountedRef.current) return;
 
-      if (status.downloading) {
+      setStatusMessage(status.message);
+      if (status.state === 'cancelling') {
+        setPhase('cancelling');
+      } else if (status.downloading) {
         setPhase('downloading');
         setProgress(status.progress);
         setSpeed(status.speed);
       } else if (status.error) {
         setPhase('failed');
         setErrorMsg(status.error);
-      } else if (status.progress >= 100) {
+      } else if (status.state === 'completed' || status.progress >= 100) {
         setPhase('completed');
         setProgress(100);
+      } else if (status.state === 'cancelled') {
+        setPhase('idle');
+        setProgress(0);
+        setSpeed(0);
       }
     } catch {
       // 轮询失败时静默处理
+    } finally {
+      pollInFlightRef.current = false;
     }
   }, []);
 
   // 下载中时每 1s 轮询进度
   useEffect(() => {
     mountedRef.current = true;
-    if (phase !== 'downloading') return;
+    if (phase !== 'downloading' && phase !== 'cancelling') return;
 
     const timer = setInterval(() => {
       void pollDownloadStatus();
@@ -128,7 +147,21 @@ export function ModelDownload({ onModelLoaded }: ModelDownloadProps): JSX.Elemen
     setErrorMsg('');
 
     try {
-      await downloadModel(selectedSource);
+      let localPath: string | undefined;
+      if (selectedSource === 'local') {
+        const { open } = await import('@tauri-apps/plugin-dialog');
+        const selected = await open({
+          directory: true,
+          multiple: false,
+          title: '选择完整的 Qwen3-ASR 模型目录',
+        });
+        if (!selected) {
+          setPhase('idle');
+          return;
+        }
+        localPath = selected;
+      }
+      await downloadModel(selectedSource, localPath);
       // 开始轮询进度
       void pollDownloadStatus();
     } catch (err) {
@@ -147,7 +180,7 @@ export function ModelDownload({ onModelLoaded }: ModelDownloadProps): JSX.Elemen
     setErrorMsg('');
 
     try {
-      await loadModel();
+      await loadModel(existingModelPath ?? undefined);
       if (mountedRef.current) {
         setToastMessage('模型加载成功');
         setTimeout(() => {
@@ -162,7 +195,7 @@ export function ModelDownload({ onModelLoaded }: ModelDownloadProps): JSX.Elemen
         );
       }
     }
-  }, [onModelLoaded]);
+  }, [existingModelPath, onModelLoaded]);
 
   /** 重试 */
   const handleRetry = useCallback(() => {
@@ -178,12 +211,7 @@ export function ModelDownload({ onModelLoaded }: ModelDownloadProps): JSX.Elemen
     } catch {
       // 取消请求失败时仍重置 UI（后端可能已退出）
     }
-    if (mountedRef.current) {
-      setPhase('idle');
-      setProgress(0);
-      setSpeed(0);
-      setErrorMsg('');
-    }
+    if (mountedRef.current) setPhase('cancelling');
   }, []);
 
   return (
@@ -200,7 +228,7 @@ export function ModelDownload({ onModelLoaded }: ModelDownloadProps): JSX.Elemen
           VoiceInput 已安装成功
         </h1>
         <p className="mt-2 text-sm leading-relaxed" style={{ color: '#86868B' }}>
-          接下来需要下载语音识别模型（约 1.2 GB），下载后所有识别在本地完成，不需要联网。
+          接下来需要下载语音识别模型（约 1.9 GB），下载后所有识别在本地完成，不需要联网。
         </p>
       </div>
 
@@ -290,13 +318,13 @@ export function ModelDownload({ onModelLoaded }: ModelDownloadProps): JSX.Elemen
         )}
 
         {/* 下载进度（downloading 状态显示） */}
-        {phase === 'downloading' && (
+        {(phase === 'downloading' || phase === 'cancelling') && (
           <div className="py-8">
             <div className="mb-4 flex items-center justify-center">
               <div className="flex items-center gap-2">
                 <LoadingIcon size={20} color="#3478F6" />
                 <span className="text-sm font-medium" style={{ color: '#1D1D1F' }}>
-                  正在下载模型...
+                  {phase === 'cancelling' ? '正在安全停止下载...' : '正在下载模型...'}
                 </span>
               </div>
             </div>
@@ -326,7 +354,7 @@ export function ModelDownload({ onModelLoaded }: ModelDownloadProps): JSX.Elemen
             </div>
 
             <p className="mt-6 text-center text-xs" style={{ color: '#86868B' }}>
-              请保持网络连接，下载过程中请勿关闭窗口
+              {statusMessage || '请保持网络连接，下载过程中请勿关闭窗口'}
             </p>
           </div>
         )}
@@ -343,7 +371,7 @@ export function ModelDownload({ onModelLoaded }: ModelDownloadProps): JSX.Elemen
               </svg>
             </div>
             <p className="text-base font-semibold" style={{ color: '#1D1D1F' }}>
-              模型下载完成
+              {existingModelPath ? '已找到本地模型' : '模型下载完成'}
             </p>
             <p className="mt-2 text-sm" style={{ color: '#86868B' }}>
               点击下方按钮将模型加载到 GPU，加载约需 5-20 秒
@@ -422,6 +450,15 @@ export function ModelDownload({ onModelLoaded }: ModelDownloadProps): JSX.Elemen
           >
             取消下载
           </button>
+        )}
+
+        {phase === 'cancelling' && (
+          <div
+            className="w-full rounded-lg py-3 text-center text-sm font-medium"
+            style={{ color: '#86868B', backgroundColor: '#F2F2F7' }}
+          >
+            正在等待下载线程退出...
+          </div>
         )}
 
         {phase === 'loading' && (

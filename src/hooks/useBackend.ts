@@ -12,10 +12,14 @@ import type { ModelStatus } from '../types';
 /** 默认模型状态（未加载） */
 const DEFAULT_MODEL_STATUS: ModelStatus = {
   loaded: false,
+  installed: false,
+  model_path: null,
   downloading: false,
   download_progress: 0,
-  model_name: '',
-  device: '',
+  download_state: 'idle',
+  download_message: '',
+  download_error: null,
+  strategy: null,
 };
 
 /** useBackend Hook 返回值 */
@@ -28,6 +32,8 @@ interface UseBackendReturn {
   modelStatus: ModelStatus;
   /** 手动刷新模型状态 */
   refreshModelStatus: () => Promise<void>;
+  /** 手动重试后端健康检查 */
+  refreshBackend: () => Promise<void>;
 }
 
 /** 后端检查间隔（毫秒） */
@@ -46,27 +52,34 @@ export function useBackend(): UseBackendReturn {
   const [loading, setLoading] = useState(true);
   const [modelStatus, setModelStatus] = useState<ModelStatus>(DEFAULT_MODEL_STATUS);
   const mountedRef = useRef(true);
+  const backendInFlightRef = useRef(false);
+  const modelInFlightRef = useRef(false);
 
   /** 检查后端状态 */
   const checkBackendStatus = useCallback(async () => {
+    if (backendInFlightRef.current) return;
+    backendInFlightRef.current = true;
     try {
       const ready = await checkBackend();
       if (mountedRef.current) {
         setBackendReady(ready);
-        if (ready) {
-          setLoading(false);
-        }
+        setLoading(false);
       }
     } catch {
       // 后端检查失败，保持 false
       if (mountedRef.current) {
         setBackendReady(false);
+        setLoading(false);
       }
+    } finally {
+      backendInFlightRef.current = false;
     }
   }, []);
 
   /** 检查模型状态 */
   const checkModelStatus = useCallback(async () => {
+    if (modelInFlightRef.current) return;
+    modelInFlightRef.current = true;
     try {
       const status = await getModelStatus();
       if (mountedRef.current) {
@@ -74,6 +87,8 @@ export function useBackend(): UseBackendReturn {
       }
     } catch {
       // 模型状态查询失败，保持默认值
+    } finally {
+      modelInFlightRef.current = false;
     }
   }, []);
 
@@ -110,6 +125,7 @@ export function useBackend(): UseBackendReturn {
     loading,
     modelStatus,
     refreshModelStatus,
+    refreshBackend: checkBackendStatus,
   };
 }
 

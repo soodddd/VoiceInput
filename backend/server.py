@@ -19,13 +19,13 @@ Endpoints
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import tempfile
 import time
 
-import numpy as np
 import soundfile as sf
 import uvicorn
 from contextlib import asynccontextmanager
@@ -38,7 +38,6 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import config
@@ -51,6 +50,7 @@ from postprocess import (
     apply_term_corrections,
     apply_zh_en_spacing,
     clean_transcription,
+    merge_transcription_chunks,
 )
 
 # ── Logging ────────────────────────────────────────────────────────
@@ -75,12 +75,19 @@ class HealthResponse(BaseModel):
 
 class ModelStatusResponse(BaseModel):
     loaded: bool
+    installed: bool
+    model_path: str | None = None
     downloading: bool
     download_progress: float
+    download_state: str
+    download_message: str
+    download_error: str | None = None
     strategy: str | None = None
 
 
 class ModelLoadRequest(BaseModel):
+    model_path: str | None = None
+    # Kept for compatibility with v0.1.x clients.
     model_name: str | None = None
 
 
@@ -96,10 +103,12 @@ class DownloadRequest(BaseModel):
 
 
 class DownloadStatusResponse(BaseModel):
+    state: str
     downloading: bool
     progress: float
     speed: float
     error: str | None = None
+    message: str
 
 
 class TranscribeResponse(BaseModel):
@@ -108,6 +117,10 @@ class TranscribeResponse(BaseModel):
     duration_ms: float = 0
     process_ms: float = 0
     chunks: int = 1
+
+
+_operation_lock = asyncio.Lock()
+_MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 
 
 # ── Token verification ─────────────────────────────────────────────
@@ -160,21 +173,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="VoiceInput ASR Backend",
-    version="2.0.0",
+    version="0.1.2",
     lifespan=lifespan,
 )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:1420",
-        "http://localhost:1420",
-        "tauri://localhost",
-    ],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 # ── Endpoints ──────────────────────────────────────────────────────
 
@@ -201,10 +202,16 @@ async def model_status(
 ) -> ModelStatusResponse:
     """Return model load state and download progress."""
     dl_status = model_manager.get_download_status()
+    model_path = model_manager.get_downloaded_model_path()
     return ModelStatusResponse(
         loaded=engine_instance.is_loaded,
+        installed=model_path is not None,
+        model_path=model_path,
         downloading=bool(dl_status["downloading"]),
         download_progress=float(dl_status["progress"]),
+        download_state=str(dl_status["state"]),
+        download_message=str(dl_status["message"]),
+        download_error=str(dl_status["error"]) if dl_status["error"] else None,
         strategy=config.MODEL_STRATEGY,
     )
 
@@ -243,13 +250,12 @@ async def set_strategy(
         )
 
     old = config.MODEL_STRATEGY
-    config.MODEL_STRATEGY = req.strategy
-    logger.info("Model strategy changed: %s -> %s", old, req.strategy)
-
-    # 如果模型已加载且策略发生变化，卸载模型以便下次加载使用新参数
-    if old != req.strategy and engine_instance.is_loaded:
-        logger.info("Unloading model to apply new strategy on next load")
-        engine_instance.unload()
+    if old != req.strategy:
+        async with _operation_lock:
+            if engine_instance.is_loaded:
+                await asyncio.to_thread(engine_instance.unload)
+            config.MODEL_STRATEGY = req.strategy
+        logger.info("Model strategy changed: %s -> %s", old, req.strategy)
 
     return {"status": "ok", "strategy": req.strategy}
 
@@ -260,11 +266,12 @@ async def model_load(
     _token: None = Depends(verify_token),
 ) -> ModelLoadResponse:
     """Load (or reload) the ASR model onto the GPU."""
-    if engine_instance.is_loaded:
-        engine_instance.unload()
-
     try:
-        engine_instance.load(req.model_name)
+        async with _operation_lock:
+            await asyncio.to_thread(
+                engine_instance.load,
+                req.model_path or req.model_name,
+            )
         return ModelLoadResponse(
             status="ok",
             loaded=True,
@@ -280,7 +287,8 @@ async def model_unload(
     _token: None = Depends(verify_token),
 ) -> ModelLoadResponse:
     """Release the model and free GPU memory."""
-    was_loaded = engine_instance.unload()
+    async with _operation_lock:
+        await asyncio.to_thread(engine_instance.unload)
     return ModelLoadResponse(
         status="ok",
         loaded=False,
@@ -299,7 +307,7 @@ async def model_download(
     ``GET /model/download/status`` for progress.
     """
     # If the model is already downloaded, short-circuit
-    if model_manager.is_model_downloaded():
+    if req.source != "local" and model_manager.is_model_downloaded():
         return {
             "status": "already_downloaded",
             "downloading": False,
@@ -310,11 +318,14 @@ async def model_download(
     if dl["downloading"]:
         return {"status": "already_downloading", "downloading": True}
 
-    started = model_manager.start_download(
-        source=req.source,
-        model_dir=str(config.MODEL_DIR),
-        local_path=req.local_path,
-    )
+    try:
+        started = model_manager.start_download(
+            source=req.source,
+            model_dir=str(config.MODEL_DIR),
+            local_path=req.local_path,
+        )
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if started:
         return {"status": "started", "downloading": True}
@@ -329,10 +340,12 @@ async def download_status(
     """Poll the current model download progress."""
     dl = model_manager.get_download_status()
     return DownloadStatusResponse(
+        state=str(dl["state"]),
         downloading=bool(dl["downloading"]),
         progress=float(dl["progress"]),
         speed=float(dl["speed"]),
         error=str(dl["error"]) if dl["error"] else None,
+        message=str(dl["message"]),
     )
 
 
@@ -347,8 +360,8 @@ async def cancel_download(
     reflect the cancelled state.  Restarting the download will resume from
     cached files.
     """
-    model_manager.cancel_download()
-    return {"status": "cancelled"}
+    requested = model_manager.cancel_download()
+    return {"status": "cancelling" if requested else "idle"}
 
 
 @app.post("/transcribe", response_model=TranscribeResponse)
@@ -358,151 +371,142 @@ async def transcribe(
     custom_terms: str | None = Form(None),
     punctuation_mode: str = Form("simple"),
     auto_space_zh_en: str = Form("true"),
+    normalize_audio: str = Form("true"),
+    trim_silence: str = Form("true"),
+    silence_threshold_db: float = Form(-40.0),
+    max_record_sec: int = Form(120),
     _token: None = Depends(verify_token),
 ) -> TranscribeResponse:
-    """Transcribe an uploaded WAV file.
-
-    Parameters (multipart/form-data)
-    --------------------------------
-    audio : file
-        WAV audio (any sample rate, mono or stereo).
-    language : str | None
-        Language hint (``"Chinese"``, ``"English"``, or ``None`` for auto).
-
-    Returns
-    -------
-    TranscribeResponse
-        Recognition result with timing and chunk metadata.
-    """
+    """Validate, preprocess and transcribe one bounded local WAV upload."""
     if language == "auto" or not language:
         language = None
 
     if not engine_instance.is_loaded:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    t0 = time.time()
+    wav_data = await audio.read(_MAX_UPLOAD_BYTES + 1)
+    if not wav_data:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+    if len(wav_data) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Audio upload exceeds 64 MiB")
+
     tmp_path: str | None = None
-    temp_files: list[str] = []  # all temp files to clean up
-
     try:
-        # 1. Save uploaded audio to a temp file
-        wav_data = await audio.read()
-        if not wav_data:
-            raise HTTPException(status_code=400, detail="Empty audio file")
-
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         tmp.write(wav_data)
         tmp.close()
         tmp_path = tmp.name
-        temp_files.append(tmp_path)
-
-        # 2. Preprocess: load → mono → 16 kHz → normalise → trim silence
-        audio_np, sr = load_and_preprocess(tmp_path)
-        duration_ms = len(audio_np) / sr * 1000
-        logger.info(
-            "Audio received: %.0f ms (preprocessed), language_hint=%s",
-            duration_ms,
-            language,
-        )
-
-        # 3. Chunk if longer than threshold
-        chunks_data = chunk_audio(audio_np, sr, threshold_sec=config.CHUNK_THRESHOLD_SEC)
-        n_chunks = len(chunks_data)
-        if n_chunks > 1:
-            logger.info("Audio split into %d chunks", n_chunks)
-
-        # 4. Transcribe each chunk
-        all_texts: list[str] = []
-        all_langs: list[str] = []
-
-        for i, chunk in enumerate(chunks_data):
-            if n_chunks > 1:
-                logger.info(
-                    "  Chunk %d/%d (%.1fs)",
-                    i + 1,
-                    n_chunks,
-                    len(chunk) / sr,
-                )
-
-            # Write chunk to temp WAV
-            chunk_path = tmp_path + f".chunk{i}.wav"
-            sf.write(chunk_path, chunk, sr)
-            temp_files.append(chunk_path)
-
-            text_i, lang_i = engine_instance.transcribe(
-                audio_path=chunk_path,
-                language=language,
+        async with _operation_lock:
+            return await asyncio.to_thread(
+                _transcribe_file,
+                tmp_path,
+                language,
+                custom_terms,
+                punctuation_mode,
+                _as_bool(auto_space_zh_en),
+                _as_bool(normalize_audio),
+                _as_bool(trim_silence),
+                max(-80.0, min(-10.0, silence_threshold_db)),
+                max(1, min(600, max_record_sec)),
             )
-
-            if text_i:
-                all_texts.append(text_i)
-            if lang_i:
-                all_langs.append(lang_i)
-
-        # 5. Merge → clean → term-correct → punctuation → spacing
-        merged_text = " ".join(all_texts)
-        merged_text = clean_transcription(merged_text)
-        merged_text = apply_term_corrections(merged_text)
-
-        # Apply user-defined custom term corrections
-        if custom_terms:
-            try:
-                terms_dict = json.loads(custom_terms)
-                merged_text = apply_custom_term_corrections(merged_text, terms_dict)
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("Failed to parse custom_terms JSON")
-
-        # P2-06: 标点模式处理
-        merged_text = apply_punctuation_mode(merged_text, mode=punctuation_mode)
-
-        # P2-07: 中英混排自动空格
-        space_enabled = auto_space_zh_en.lower() in ("true", "1", "yes")
-        merged_text = apply_zh_en_spacing(merged_text, enabled=space_enabled)
-
-        # Determine dominant language
-        if all_langs:
-            # Most common language
-            lang = max(set(all_langs), key=all_langs.count)
-        else:
-            lang = None
-
-        process_ms = (time.time() - t0) * 1000
-        logger.info(
-            "Transcription complete [%s] %.0fms, %d chunk(s): %s",
-            lang,
-            process_ms,
-            n_chunks,
-            merged_text[:200],
-        )
-
-        # 省显存策略：每次识别完成后立即释放模型
-        if engine_instance.should_unload_after_use and engine_instance.is_loaded:
-            logger.info("Memory strategy: unloading model after transcription")
-            engine_instance.unload()
-
-        return TranscribeResponse(
-            text=merged_text,
-            language=lang,
-            duration_ms=duration_ms,
-            process_ms=process_ms,
-            chunks=n_chunks,
-        )
-
     except HTTPException:
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Transcription failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail=str(exc))
-
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
-        # 6. Robust temp file cleanup (None-check to avoid v1 bug)
-        for fpath in temp_files:
-            if fpath is not None:
-                try:
-                    if os.path.exists(fpath):
-                        os.unlink(fpath)
-                except OSError:
-                    pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _as_bool(value: str) -> bool:
+    return value.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def _transcribe_file(
+    tmp_path: str,
+    language: str | None,
+    custom_terms: str | None,
+    punctuation_mode: str,
+    auto_space: bool,
+    normalize: bool,
+    trim: bool,
+    silence_threshold_db: float,
+    max_record_sec: int,
+) -> TranscribeResponse:
+    """Blocking inference body, intentionally kept off FastAPI's event loop."""
+    started = time.monotonic()
+    chunk_paths: list[str] = []
+    try:
+        audio_np, sample_rate = load_and_preprocess(
+            tmp_path,
+            normalize=normalize,
+            trim=trim,
+            silence_threshold_db=silence_threshold_db,
+        )
+        duration_sec = len(audio_np) / sample_rate
+        if duration_sec > max_record_sec + 1:
+            raise ValueError(f"Audio exceeds the {max_record_sec}-second limit")
+
+        chunks_data = chunk_audio(
+            audio_np,
+            sample_rate,
+            threshold_sec=min(config.CHUNK_THRESHOLD_SEC, float(max_record_sec)),
+        )
+        texts: list[str] = []
+        languages: list[str] = []
+        for index, chunk in enumerate(chunks_data):
+            chunk_path = f"{tmp_path}.chunk{index}.wav"
+            sf.write(chunk_path, chunk, sample_rate)
+            chunk_paths.append(chunk_path)
+            text, detected_language = engine_instance.transcribe(chunk_path, language)
+            if text:
+                texts.append(text)
+            if detected_language:
+                languages.append(detected_language)
+
+        merged = merge_transcription_chunks(texts)
+        merged = apply_term_corrections(merged)
+        if custom_terms:
+            try:
+                mapping = json.loads(custom_terms)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("custom_terms must be a JSON object") from exc
+            if not isinstance(mapping, dict):
+                raise ValueError("custom_terms must be a JSON object")
+            merged = apply_custom_term_corrections(merged, mapping)
+        merged = apply_punctuation_mode(merged, mode=punctuation_mode)
+        merged = apply_zh_en_spacing(merged, enabled=auto_space)
+
+        detected = max(set(languages), key=languages.count) if languages else None
+        process_ms = (time.monotonic() - started) * 1000
+        logger.info(
+            "Transcription complete: duration=%.0fms process=%.0fms chunks=%d language=%s",
+            duration_sec * 1000,
+            process_ms,
+            len(chunks_data),
+            detected,
+        )
+        return TranscribeResponse(
+            text=clean_transcription(merged),
+            language=detected,
+            duration_ms=duration_sec * 1000,
+            process_ms=process_ms,
+            chunks=len(chunks_data),
+        )
+    finally:
+        for chunk_path in chunk_paths:
+            try:
+                os.unlink(chunk_path)
+            except OSError:
+                pass
+        if engine_instance.should_unload_after_use and engine_instance.is_loaded:
+            engine_instance.unload()
 
 
 # ── Direct-run fallback ────────────────────────────────────────────

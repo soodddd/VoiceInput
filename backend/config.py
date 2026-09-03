@@ -121,6 +121,13 @@ def init_config(
     """
     global TOKEN, PORT, MODEL_DIR, DEVICE, MODEL_STRATEGY
 
+    if not token or len(token) < 16:
+        raise ValueError("A strong local API token is required")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("Port must be between 1 and 65535")
+    if model_strategy is not None and model_strategy not in STRATEGY_PARAMS:
+        raise ValueError(f"Unsupported model strategy: {model_strategy}")
+
     TOKEN = token
     if port is not None:
         PORT = port

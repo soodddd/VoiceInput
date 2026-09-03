@@ -26,6 +26,7 @@ mod recorder;
 mod token;
 mod tray;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
@@ -40,6 +41,10 @@ pub struct AppState {
     pub recorder: Arc<Mutex<recorder::Recorder>>,
     /// Python 后端进程管理器
     pub backend: Arc<Mutex<process_manager::BackendManager>>,
+    /// 应用退出标记，阻止监控线程在退出过程中重启 sidecar
+    pub shutting_down: Arc<AtomicBool>,
+    /// A transcription request is in flight.
+    pub asr_busy: Arc<AtomicBool>,
 }
 
 /// Tauri 应用入口点。
@@ -69,9 +74,7 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // ── 1. GPU 检测 ──
@@ -96,12 +99,12 @@ pub fn run() {
                 Box::<dyn std::error::Error>::from(e)
             })?;
             let token = token::ensure_token(&mut cfg);
-            log::info!("当前 token: {}...", &token[..8.min(token.len())]);
 
             // ── 3. 启动 Python sidecar 后端 ──
             log::info!("[3/6] 启动 Python 后端...");
             let model_dir = get_model_dir();
-            let server_port = 8765u16;
+            let server_port = reserve_local_port().unwrap_or(8765);
+            cfg.server_url = format!("http://127.0.0.1:{}", server_port);
             let mut backend = process_manager::BackendManager::new(
                 token.clone(),
                 server_port,
@@ -118,23 +121,65 @@ pub fn run() {
 
             // 将 backend 包装为 Arc<Mutex<>> 以便共享给健康监控线程
             let backend = Arc::new(Mutex::new(backend));
+            let shutting_down = Arc::new(AtomicBool::new(false));
 
             // ── 3.5 启动后端健康监控线程（崩溃自动重启） ──
             {
                 let backend_clone = Arc::clone(&backend);
+                let shutting_down_clone = Arc::clone(&shutting_down);
                 std::thread::spawn(move || {
                     log::info!("后端健康监控线程已启动（每 10 秒检查一次）");
+                    let health_client = reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(2))
+                        .build()
+                        .ok();
+                    let mut unhealthy_checks = 0u32;
+                    let mut restart_attempts = 0u32;
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(10));
-                        let mut bm = match backend_clone.lock() {
-                            Ok(guard) => guard,
+                        if shutting_down_clone.load(Ordering::Acquire) {
+                            return;
+                        }
+                        let (process_alive, health_url) = match backend_clone.lock() {
+                            Ok(mut backend) => (
+                                backend.is_alive(),
+                                format!("{}/health", backend.server_url()),
+                            ),
                             Err(_) => continue,
                         };
-                        if !bm.is_alive() {
-                            log::warn!("后端进程未存活，尝试自动重启...");
-                            match bm.restart() {
-                                Ok(()) => log::info!("后端自动重启成功"),
-                                Err(e) => log::error!("后端自动重启失败: {}", e),
+                        let healthy = process_alive
+                            && health_client
+                                .as_ref()
+                                .and_then(|client| client.get(&health_url).send().ok())
+                                .map(|response| response.status().is_success())
+                                .unwrap_or(false);
+                        if healthy {
+                            unhealthy_checks = 0;
+                            restart_attempts = 0;
+                            continue;
+                        }
+
+                        unhealthy_checks += 1;
+                        // Allow up to 60 seconds for a cold Python/torch start.
+                        if unhealthy_checks < 6 {
+                            continue;
+                        }
+                        unhealthy_checks = 0;
+                        if restart_attempts >= 3 {
+                            log::error!("后端连续重启失败 3 次，停止自动重启");
+                            return;
+                        }
+                        restart_attempts += 1;
+                        log::warn!("后端无健康响应，执行第 {} 次重启", restart_attempts);
+                        if let Ok(mut backend) = backend_clone.lock() {
+                            match backend.restart() {
+                                Ok(()) => {
+                                    log::info!("后端自动重启成功");
+                                    restart_attempts = 0;
+                                }
+                                Err(e) => {
+                                    log::error!("后端自动重启失败: {}", e);
+                                }
                             }
                         }
                     }
@@ -146,6 +191,7 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let hotkey_config = cfg.clone();
             hotkey::start_hotkey_listener(app_handle, hotkey_config);
+            paste::start_focus_tracker(app.handle().clone());
 
             // ── 5. 创建系统托盘 ──
             log::info!("[5/6] 创建系统托盘...");
@@ -159,6 +205,8 @@ pub fn run() {
                 config: Arc::new(Mutex::new(cfg)),
                 recorder: Arc::new(Mutex::new(recorder::Recorder::new())),
                 backend,
+                shutting_down,
+                asr_busy: Arc::new(AtomicBool::new(false)),
             };
             app.manage(state);
 
@@ -188,6 +236,17 @@ pub fn run() {
             commands::get_model_strategy,
             commands::set_model_strategy,
         ])
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(state) = window.app_handle().try_state::<AppState>() {
+                    state.shutting_down.store(true, Ordering::Release);
+                    hotkey::stop_hotkey_listener();
+                    if let Ok(mut backend) = state.backend.lock() {
+                        let _ = backend.stop();
+                    }
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -197,6 +256,14 @@ pub fn run() {
 /// 路径: `%LOCALAPPDATA%\VoiceInput\models`
 fn get_model_dir() -> std::path::PathBuf {
     config::get_config_dir().join("models")
+}
+
+/// Ask Windows for a currently free loopback port instead of assuming 8765.
+fn reserve_local_port() -> Option<u16> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .ok()
+        .and_then(|listener| listener.local_addr().ok())
+        .map(|address| address.port())
 }
 
 /// 初始化日志系统：同时输出到 stderr 和日志文件。

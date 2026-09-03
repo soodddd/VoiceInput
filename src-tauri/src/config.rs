@@ -13,6 +13,7 @@ use std::path::PathBuf;
 /// 应用配置结构体，对应 config.json 文件内容。
 /// 字段命名与 resources/default_config.json 保持一致（snake_case）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     /// 主快捷键，如 "alt+v"（按下开始录音，松开停止）
     pub hotkey: String,
@@ -26,8 +27,6 @@ pub struct AppConfig {
     pub channels: u32,
     /// 粘贴前延迟（毫秒），等待焦点切换
     pub paste_delay_ms: u64,
-    /// 粘贴后是否恢复原剪贴板内容
-    pub clipboard_restore: bool,
     /// 输入设备索引（None = 系统默认设备）
     pub input_device: Option<i32>,
     /// 是否启用音频归一化
@@ -41,9 +40,8 @@ pub struct AppConfig {
     /// HTTP 请求超时（秒）
     pub request_timeout_sec: u32,
     /// Python sidecar 服务地址
+    #[serde(skip_serializing, skip_deserializing, default = "default_server_url")]
     pub server_url: String,
-    /// 模型路径（None = 使用默认路径）
-    pub model_path: Option<String>,
     /// 模型策略: "fast" / "balanced" / "accurate" / "memory"
     pub model_strategy: String,
 
@@ -63,7 +61,7 @@ pub struct AppConfig {
 
     /// ── 运行时字段（不写入 default_config.json 模板）──
     /// 鉴权 token，首次启动自动生成
-    #[serde(default)]
+    #[serde(skip_serializing, skip_deserializing, default)]
     pub token: Option<String>,
     /// 当前选定的输入设备名（用于 sidecar 设备映射，可选）
     #[serde(default)]
@@ -83,6 +81,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_server_url() -> String {
+    "http://127.0.0.1:8765".to_string()
+}
+
 impl Default for AppConfig {
     /// 返回与 resources/default_config.json 一致的默认配置。
     fn default() -> Self {
@@ -93,7 +95,6 @@ impl Default for AppConfig {
             sample_rate: 16000,
             channels: 1,
             paste_delay_ms: 800,
-            clipboard_restore: true,
             input_device: None,
             normalize_audio: true,
             trim_silence: true,
@@ -101,7 +102,6 @@ impl Default for AppConfig {
             max_record_sec: 120,
             request_timeout_sec: 120,
             server_url: "http://127.0.0.1:8765".to_string(),
-            model_path: None,
             model_strategy: "balanced".to_string(),
             auto_start: false,
             punctuation_mode: "simple".to_string(),
@@ -166,13 +166,25 @@ pub fn load_config() -> Result<AppConfig, AppError> {
 
     match serde_json::from_str::<AppConfig>(&content) {
         Ok(cfg) => {
+            if let Err(error) = validate_config(&cfg) {
+                log::warn!("配置值无效 ({}), 使用安全默认配置", error);
+                return Ok(AppConfig::default());
+            }
             log::info!("配置加载成功");
             Ok(cfg)
         }
         Err(e) => {
             log::warn!("配置文件解析失败 ({}), 回退到默认配置", e);
+            let corrupt_path = config_path.with_extension(format!(
+                "corrupt-{}.json",
+                chrono::Local::now().format("%Y%m%d-%H%M%S")
+            ));
+            if let Err(copy_error) = fs::copy(&config_path, &corrupt_path) {
+                log::warn!("备份损坏配置失败: {}", copy_error);
+            } else {
+                log::warn!("损坏配置已备份到 {}", corrupt_path.display());
+            }
             let default_cfg = AppConfig::default();
-            // 尝试覆盖损坏的配置文件
             let _ = save_config(&default_cfg);
             Ok(default_cfg)
         }
@@ -183,6 +195,7 @@ pub fn load_config() -> Result<AppConfig, AppError> {
 ///
 /// 会自动创建配置目录（若不存在），并以格式化 JSON 写入。
 pub fn save_config(cfg: &AppConfig) -> Result<(), AppError> {
+    validate_config(cfg)?;
     let config_dir = get_config_dir();
     fs::create_dir_all(&config_dir)
         .map_err(|e| AppError::Config(format!("创建配置目录失败: {}", e)))?;
@@ -191,10 +204,61 @@ pub fn save_config(cfg: &AppConfig) -> Result<(), AppError> {
         .map_err(|e| AppError::Config(format!("序列化配置失败: {}", e)))?;
 
     let config_path = get_config_path();
+    if config_path.exists() {
+        let backup_path = config_path.with_extension("json.bak");
+        fs::copy(&config_path, &backup_path)
+            .map_err(|e| AppError::Config(format!("备份配置文件失败: {}", e)))?;
+    }
     fs::write(&config_path, json)
         .map_err(|e| AppError::Config(format!("写入配置文件失败: {}", e)))?;
 
     log::info!("配置已保存到 {}", config_path.display());
+    Ok(())
+}
+
+/// Reject settings that can break capture, hang requests, or route private
+/// audio away from the loopback sidecar.
+pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
+    crate::hotkey::validate_hotkey(&cfg.hotkey)
+        .map_err(|error| AppError::Config(format!("主快捷键无效: {}", error)))?;
+    crate::hotkey::validate_hotkey(&cfg.language_hotkey)
+        .map_err(|error| AppError::Config(format!("语言快捷键无效: {}", error)))?;
+    if cfg.hotkey.eq_ignore_ascii_case(&cfg.language_hotkey) {
+        return Err(AppError::Config("两个快捷键不能相同".to_string()));
+    }
+    if !(8_000..=192_000).contains(&cfg.sample_rate) {
+        return Err(AppError::Config("采样率必须在 8000-192000 Hz".to_string()));
+    }
+    if cfg.channels != 1 {
+        return Err(AppError::Config("当前仅支持单声道输出".to_string()));
+    }
+    if !(1..=600).contains(&cfg.max_record_sec) {
+        return Err(AppError::Config("最大录音时长必须在 1-600 秒".to_string()));
+    }
+    if !(5..=600).contains(&cfg.request_timeout_sec) {
+        return Err(AppError::Config("请求超时必须在 5-600 秒".to_string()));
+    }
+    if !(-80..=-10).contains(&cfg.silence_threshold_db) {
+        return Err(AppError::Config("静音阈值必须在 -80 到 -10 dB".to_string()));
+    }
+    if cfg.paste_delay_ms > 3000 {
+        return Err(AppError::Config("输入延迟不能超过 3000 毫秒".to_string()));
+    }
+    if !matches!(cfg.language.as_str(), "auto" | "Chinese" | "English") {
+        return Err(AppError::Config("识别语言配置无效".to_string()));
+    }
+    if !matches!(
+        cfg.model_strategy.as_str(),
+        "fast" | "balanced" | "accurate" | "memory"
+    ) {
+        return Err(AppError::Config("模型策略配置无效".to_string()));
+    }
+    if !matches!(
+        cfg.punctuation_mode.as_str(),
+        "raw" | "simple" | "input_method"
+    ) {
+        return Err(AppError::Config("标点模式配置无效".to_string()));
+    }
     Ok(())
 }
 
@@ -208,7 +272,6 @@ mod tests {
         assert_eq!(cfg.hotkey, "alt+v");
         assert_eq!(cfg.sample_rate, 16000);
         assert_eq!(cfg.channels, 1);
-        assert!(cfg.clipboard_restore);
         assert!(cfg.token.is_none());
     }
 

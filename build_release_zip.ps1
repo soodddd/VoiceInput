@@ -1,149 +1,171 @@
-﻿# ============================================================
-#  VoiceInput v2 — 预打包 zip 版本构建脚本
-#
-#  将 voiceinput.exe + asr_backend.exe + 资源文件打包为
-#  解压即用的 zip 分发包。绕过 NSIS 对超大 sidecar 的 mmap 限制。
-#
-#  用法: powershell -ExecutionPolicy Bypass -File build_release_zip.ps1
-# ============================================================
-
 param(
-    [string]$Version = "0.1.2-preview",
+    [string]$Version = "",
     [string]$OutputDir = ".\release"
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-Write-Host "=========================================="
-Write-Host " VoiceInput v$Version - Release Zip Builder"
-Write-Host "=========================================="
-
-# ── 1. 验证构建产物存在 ──
-Write-Host "`n[1/5] 验证构建产物..."
+if (-not $Version) {
+    $TauriConfig = Get-Content (Join-Path $ProjectRoot "src-tauri\tauri.conf.json") -Raw |
+        ConvertFrom-Json
+    $Version = "$($TauriConfig.version)-preview"
+}
 
 $VoiceinputExe = Join-Path $ProjectRoot "src-tauri\target\release\voiceinput.exe"
-$SidecarExe = Join-Path $ProjectRoot "src-tauri\binaries\asr_backend.exe"
+$BackendDir = Join-Path $ProjectRoot "src-tauri\binaries\asr_backend"
+$BackendExe = Join-Path $BackendDir "asr_backend.exe"
 $DefaultConfig = Join-Path $ProjectRoot "resources\default_config.json"
 $IconFile = Join-Path $ProjectRoot "src-tauri\resources\icon.ico"
 
-$RequiredFiles = @(
-    @{ Path = $VoiceinputExe; Desc = "Tauri 主程序" },
-    @{ Path = $SidecarExe; Desc = "Python ASR sidecar" },
-    @{ Path = $DefaultConfig; Desc = "默认配置文件" },
-    @{ Path = $IconFile; Desc = "应用图标" }
-)
-
-foreach ($f in $RequiredFiles) {
-    if (-not (Test-Path $f.Path)) {
-        Write-Host "ERROR: $($f.Desc) 不存在: $($f.Path)" -ForegroundColor Red
-        Write-Host "请先运行: npm run tauri build (生成 voiceinput.exe) 和 build_backend.bat (生成 asr_backend.exe)"
-        exit 1
+$Required = @($VoiceinputExe, $BackendExe, $DefaultConfig, $IconFile)
+foreach ($Path in $Required) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Required release input is missing: $Path"
     }
-    $size = (Get-Item $f.Path).Length / 1MB
-    Write-Host "  OK: $($f.Desc) ($('{0:N1}' -f $size) MB)"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $BackendDir "_internal") -PathType Container)) {
+    throw "Backend _internal directory is missing. Rebuild with build_backend.bat."
 }
 
-# ── 2. 创建临时打包目录 ──
-Write-Host "`n[2/5] 准备打包目录..."
+$TempRoot = [System.IO.Path]::GetFullPath($env:TEMP)
+$RunId = [Guid]::NewGuid().ToString("N")
+$StagingDir = Join-Path $TempRoot "voiceinput-release-$RunId"
+$ExtractDir = Join-Path $TempRoot "voiceinput-verify-$RunId"
+$SmokeModelDir = Join-Path $TempRoot "voiceinput-model-$RunId"
+$BackendProcess = $null
 
-$StagingDir = Join-Path $env:TEMP "voiceinput_release_$Version"
-if (Test-Path $StagingDir) {
-    Remove-Item -Recurse -Force $StagingDir
+function Assert-SafeTempPath([string]$Path) {
+    $Resolved = [System.IO.Path]::GetFullPath($Path)
+    if (-not $Resolved.StartsWith($TempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean a path outside TEMP: $Resolved"
+    }
 }
-$BinariesDir = Join-Path $StagingDir "binaries"
-$ResourcesDir = Join-Path $StagingDir "resources"
-New-Item -ItemType Directory -Path $StagingDir | Out-Null
-New-Item -ItemType Directory -Path $BinariesDir | Out-Null
-New-Item -ItemType Directory -Path $ResourcesDir | Out-Null
 
-# ── 3. 复制文件 ──
-Write-Host "`n[3/5] 复制文件到打包目录..."
+try {
+    Write-Host "[1/6] Staging release files..."
+    New-Item -ItemType Directory -Path $StagingDir | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $StagingDir "resources") | Out-Null
 
-Copy-Item $VoiceinputExe -Destination $StagingDir -Force
-Write-Host "  voiceinput.exe -> 根目录"
+    Copy-Item -LiteralPath $VoiceinputExe -Destination $StagingDir
+    Copy-Item -LiteralPath $BackendDir -Destination $StagingDir -Recurse
+    Copy-Item -LiteralPath $DefaultConfig -Destination (Join-Path $StagingDir "resources")
+    Copy-Item -LiteralPath $IconFile -Destination (Join-Path $StagingDir "resources")
 
-Copy-Item $SidecarExe -Destination $BinariesDir -Force
-Write-Host "  asr_backend.exe -> binaries/"
+    Write-Host "[2/6] Writing manifest (large runtime; this may take a few minutes)..."
+    $Readme = @"
+VoiceInput v$Version - Windows 本地语音输入
+=========================================
 
-Copy-Item $DefaultConfig -Destination $ResourcesDir -Force
-Write-Host "  default_config.json -> resources/"
-
-Copy-Item $IconFile -Destination $ResourcesDir -Force
-Write-Host "  icon.ico -> resources/"
-
-# 生成 README.txt
-$ReadmeContent = @"
-VoiceInput v$Version - Windows 本地语音输入法
-================================================
-
-【系统要求】
+系统要求
 - Windows 10 1903+ 或 Windows 11
-- NVIDIA GPU（CUDA 11.8+ 兼容）
-- 4GB+ 显存
-- 200MB 磁盘空间（不含模型）
+- 支持 CUDA 的 NVIDIA GPU，建议 4 GB 以上显存
+- 至少 6 GB 可用磁盘空间（程序约 2.7 GB，模型约 1.9 GB）
 - 麦克风
 
-【快速开始】
-1. 解压此 zip 到任意目录（如 C:\Program Files\VoiceInput\）
-2. 双击运行 voiceinput.exe
-3. 首次启动会提示下载语音识别模型（约 1.2 GB）
-4. 模型加载完成后，按 Alt+V 开始语音输入
+使用方法
+1. 必须完整解压 ZIP，不能直接在压缩包内运行。
+2. 保持 asr_backend\_internal 与 asr_backend.exe 的相对位置不变。
+3. 双击 voiceinput.exe。
+4. 首次使用选择下载源或本地完整模型目录。
+5. 点击麦克风开始/停止，或按住 Alt+V 说话并在松开后识别。
 
-【快捷键】
-- Alt+V：按住说话，松开后自动识别并粘贴
-- Alt+L：切换识别语言（Auto / 中文 / 英文）
+隐私
+识别请求仅发送到本机随机回环端口。自动输入不修改剪贴板内容。
 
-【文件结构】
-voiceinput.exe              主程序
-binaries\asr_backend.exe    Python ASR 后端（本地运行）
-resources\                  默认配置和图标
-%LOCALAPPDATA%\VoiceInput\  用户配置和模型存储目录
-
-【隐私说明】
-所有语音识别在本地 GPU 完成，不上传任何数据到云端。
-
-【技术支持】
-日志文件位于: %LOCALAPPDATA%\VoiceInput\logs\
+日志
+%LOCALAPPDATA%\VoiceInput\logs\
 "@
+    Set-Content -LiteralPath (Join-Path $StagingDir "README.txt") -Value $Readme -Encoding UTF8
 
-$ReadmePath = Join-Path $StagingDir "README.txt"
-Set-Content -Path $ReadmePath -Value $ReadmeContent -Encoding UTF8
-Write-Host "  README.txt -> 根目录"
+    $ManifestLines = Get-ChildItem -LiteralPath $StagingDir -File -Recurse |
+        Sort-Object FullName |
+        ForEach-Object {
+            # Windows PowerShell 5.1/.NET Framework does not provide
+            # Path.GetRelativePath; all files are descendants of StagingDir.
+            $Relative = $_.FullName.Substring($StagingDir.Length).TrimStart('\', '/')
+            $Hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+            "$Hash *$Relative"
+        }
+    Set-Content -LiteralPath (Join-Path $StagingDir "SHA256SUMS.txt") -Value $ManifestLines -Encoding UTF8
 
-# ── 4. 创建 zip ──
-Write-Host "`n[4/5] 创建 zip 分发包..."
+    $ResolvedOutput = if ([System.IO.Path]::IsPathRooted($OutputDir)) {
+        $OutputDir
+    } else {
+        Join-Path $ProjectRoot $OutputDir
+    }
+    New-Item -ItemType Directory -Path $ResolvedOutput -Force | Out-Null
+    $ZipPath = Join-Path $ResolvedOutput "VoiceInput-v$Version-win64.zip"
+    if (Test-Path -LiteralPath $ZipPath) {
+        Remove-Item -LiteralPath $ZipPath -Force
+    }
 
-if (-not (Test-Path $OutputDir)) {
-    New-Item -ItemType Directory -Path $OutputDir | Out-Null
+    Write-Host "[3/6] Creating ZIP (large CUDA runtime; compression may take several minutes)..."
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $StagingDir,
+        $ZipPath,
+        [System.IO.Compression.CompressionLevel]::Optimal,
+        $false
+    )
+
+    Write-Host "[4/6] Extracting ZIP into a fresh verification directory..."
+    New-Item -ItemType Directory -Path $ExtractDir | Out-Null
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $ExtractDir)
+    $ExtractedBackend = Join-Path $ExtractDir "asr_backend\asr_backend.exe"
+    if (-not (Test-Path -LiteralPath $ExtractedBackend -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $ExtractDir "asr_backend\_internal") -PathType Container)) {
+        throw "Fresh-extraction layout validation failed."
+    }
+
+    Write-Host "[5/6] Starting the freshly extracted backend for health smoke test..."
+    New-Item -ItemType Directory -Path $SmokeModelDir | Out-Null
+    $Listener = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback,
+        0
+    )
+    $Listener.Start()
+    $SmokePort = ([System.Net.IPEndPoint]$Listener.LocalEndpoint).Port
+    $Listener.Stop()
+    $SmokeToken = [Guid]::NewGuid().ToString()
+    $BackendProcess = Start-Process -FilePath $ExtractedBackend -ArgumentList @(
+        "--token", $SmokeToken,
+        "--port", "$SmokePort",
+        "--model-dir", $SmokeModelDir,
+        "--device", "cuda:0",
+        "--model-strategy", "balanced"
+    ) -WindowStyle Hidden -PassThru
+
+    $Healthy = $false
+    $Deadline = [DateTime]::UtcNow.AddSeconds(90)
+    while ([DateTime]::UtcNow -lt $Deadline -and -not $BackendProcess.HasExited) {
+        try {
+            $Health = Invoke-RestMethod -Uri "http://127.0.0.1:$SmokePort/health" -TimeoutSec 2
+            if ($Health.status -eq "ok") {
+                $Healthy = $true
+                break
+            }
+        } catch {
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    if (-not $Healthy) {
+        throw "Fresh-extraction backend health smoke test failed."
+    }
+
+    Write-Host "[6/6] Release verification complete."
+    Write-Host "PASS: fresh extraction, _internal layout, manifest, and backend health"
+    Write-Host "Release: $ZipPath"
+    Write-Host ("Size: {0:N1} MB" -f ((Get-Item -LiteralPath $ZipPath).Length / 1MB))
 }
-
-$ZipName = "VoiceInput-v$Version-win64.zip"
-$ZipPath = Join-Path $OutputDir $ZipName
-
-if (Test-Path $ZipPath) {
-    Remove-Item $ZipPath -Force
+finally {
+    if ($null -ne $BackendProcess -and -not $BackendProcess.HasExited) {
+        Stop-Process -Id $BackendProcess.Id -Force
+        $BackendProcess.WaitForExit()
+    }
+    foreach ($Path in @($StagingDir, $ExtractDir, $SmokeModelDir)) {
+        if (Test-Path -LiteralPath $Path) {
+            Assert-SafeTempPath $Path
+            Remove-Item -LiteralPath $Path -Recurse -Force
+        }
+    }
 }
-
-# 使用 .NET ZipFile 类（支持大文件）
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory($StagingDir, $ZipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
-
-$ZipSize = (Get-Item $ZipPath).Length / 1MB
-Write-Host "  已创建: $ZipPath"
-Write-Host "  大小: $('{0:N1}' -f $ZipSize) MB"
-
-# ── 5. 清理临时目录 ──
-Write-Host "`n[5/5] 清理临时文件..."
-Remove-Item -Recurse -Force $StagingDir
-Write-Host "  已清理临时打包目录"
-
-# ── 完成 ──
-Write-Host "`n=========================================="
-Write-Host " 构建完成！"
-Write-Host "=========================================="
-Write-Host "分发包: $ZipPath"
-Write-Host "大小: $('{0:N1}' -f $ZipSize) MB"
-Write-Host ""
-Write-Host "用户使用方式: 解压 zip 到任意目录，运行 voiceinput.exe"
-Write-Host ""

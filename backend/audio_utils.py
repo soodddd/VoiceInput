@@ -33,7 +33,14 @@ TARGET_SR: int = 16000
 # ── Core pipeline ──────────────────────────────────────────────────
 
 
-def load_and_preprocess(wav_path: str) -> tuple[np.ndarray, int]:
+def load_and_preprocess(
+    wav_path: str,
+    *,
+    normalize: bool = True,
+    trim: bool = True,
+    silence_threshold_db: float | None = None,
+    max_gain_db: float = 18.0,
+) -> tuple[np.ndarray, int]:
     """Load *wav_path* and return ``(audio, sample_rate)``.
 
     The returned audio is mono, 16 kHz, ``float32``, peak-normalised
@@ -51,22 +58,36 @@ def load_and_preprocess(wav_path: str) -> tuple[np.ndarray, int]:
         data = _resample(data, sr, TARGET_SR)
         sr = TARGET_SR
 
-    # Peak normalisation to -1 dBFS  (10^(-1/20) ≈ 0.891)
-    peak = float(np.max(np.abs(data))) if data.size > 0 else 0.0
-    if peak > 0:
-        data = data * (0.891 / peak)
+    if data.size == 0:
+        raise ValueError("Empty audio file")
 
-    # Trim leading / trailing silence
-    data = trim_silence(
-        data,
-        sr,
-        threshold_db=config.SILENCE_THRESHOLD_DB,
+    threshold_db = (
+        config.SILENCE_THRESHOLD_DB
+        if silence_threshold_db is None
+        else float(silence_threshold_db)
     )
 
-    # Guard against all-silence audio producing an empty array
+    # Detect/trim silence before normalisation.  Normalising first amplifies a
+    # quiet noise floor and makes silence detection ineffective.
+    if trim:
+        data = trim_silence(data, sr, threshold_db=threshold_db)
+
     if data.size == 0:
-        logger.warning("Audio appears to be entirely silent after preprocessing")
-        data = np.zeros(int(sr * 0.1), dtype=np.float32)  # 100 ms of silence
+        raise ValueError("No speech detected")
+
+    rms = float(np.sqrt(np.mean(np.square(data, dtype=np.float64))))
+    threshold = 10 ** (threshold_db / 20)
+    if rms <= threshold * 0.35:
+        raise ValueError("No speech detected")
+
+    # Peak normalisation to -1 dBFS with a gain cap.  The cap avoids turning a
+    # barely audible noise floor into full-scale audio.
+    if normalize:
+        peak = float(np.max(np.abs(data)))
+        if peak > 0:
+            desired_gain = 0.891 / peak
+            max_gain = 10 ** (max_gain_db / 20)
+            data = data * min(desired_gain, max_gain)
 
     return data.astype(np.float32), sr
 
@@ -111,22 +132,21 @@ def trim_silence(
     rms = np.sqrt(np.mean(frames ** 2, axis=1))
 
     # Find first non-silent frame
-    start = 0
+    start: int | None = None
     for i in range(n_frames):
         if rms[i] > threshold:
             start = max(0, i * frame_len - int(sr * 0.05))  # 50 ms padding
             break
 
     # Find last non-silent frame
-    end = len(audio)
+    end: int | None = None
     for i in range(n_frames - 1, -1, -1):
         if rms[i] > threshold:
             end = min(len(audio), (i + 1) * frame_len + int(sr * 0.05))
             break
 
-    if end <= start:
-        # Entirely silent — return original
-        return audio
+    if start is None or end is None or end <= start:
+        return np.empty(0, dtype=audio.dtype)
 
     return audio[start:end]
 
@@ -204,36 +224,30 @@ def chunk_audio(
         return [audio]
 
     overlap_samples = int(config.CHUNK_OVERLAP_SEC * sr)
+    max_samples = max(1, int(threshold_sec * sr))
     split_points = find_split_points(audio, sr)
 
-    if not split_points:
-        # No silence found — force-split at regular intervals
-        chunk_len = int(threshold_sec * sr)
-        chunks: list[np.ndarray] = []
-        for start in range(0, len(audio), chunk_len):
-            chunks.append(audio[start : start + chunk_len])
-        return chunks if chunks else [audio]
-
-    # Build chunks respecting the threshold and adding overlap
+    # Always enforce the maximum window.  Prefer the latest silence in the
+    # final 30% of a window; otherwise split at the hard boundary.  Adjacent
+    # windows retain a small overlap which is de-duplicated after recognition.
     chunks: list[np.ndarray] = []
-    last = 0
-
-    for sp in split_points:
-        # Only split if the current segment is at least 70 % of threshold
-        if (sp - last) / sr >= threshold_sec * 0.7:
-            chunks.append(audio[last:sp])
-            # Next chunk starts *overlap_samples* before the split point
-            last = max(0, sp - overlap_samples)
-
-    # Append remaining audio
-    if last < len(audio):
-        remaining = audio[last:]
-        if len(remaining) / sr > 1.0:
-            chunks.append(remaining)
-        elif chunks:
-            # Merge tiny tail into previous chunk
-            chunks[-1] = np.concatenate([chunks[-1], remaining])
+    logical_start = 0
+    while logical_start < len(audio):
+        hard_end = min(len(audio), logical_start + max_samples)
+        if hard_end == len(audio):
+            split_at = hard_end
         else:
-            chunks.append(remaining)
+            preferred_start = logical_start + int(max_samples * 0.7)
+            candidates = [
+                point for point in split_points
+                if preferred_start <= point <= hard_end
+            ]
+            split_at = candidates[-1] if candidates else hard_end
+
+        physical_start = 0 if not chunks else max(0, logical_start - overlap_samples)
+        chunks.append(audio[physical_start:split_at])
+        if split_at <= logical_start:
+            break
+        logical_start = split_at
 
     return chunks if chunks else [audio]

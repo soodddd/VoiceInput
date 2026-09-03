@@ -1,21 +1,11 @@
-"""
-VoiceInput v2 — Model Download & Path Management
-
-Supports downloading the Qwen3-ASR-0.6B model from three sources:
-
-* **ModelScope** — recommended for users in mainland China.
-* **HuggingFace** — international users.
-* **local**      — user supplies an existing model directory.
-
-Downloads run in a background thread.  Progress is tracked via a global
-``_download_status`` dictionary that the FastAPI ``/model/download/status``
-endpoint polls (per architecture decision Q-A2: polling, not SSE).
-"""
+"""Thread-safe local model discovery and download management."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -24,136 +14,151 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# ── Global state ───────────────────────────────────────────────────
-
-#: Approximate model size in bytes — used for progress estimation.
 _EXPECTED_SIZE: int = config.EXPECTED_MODEL_SIZE
+_MODEL_MARKER = "selected_model.json"
+_VALID_SOURCES = {"modelscope", "huggingface", "local"}
 
-#: Current download status, polled by ``/model/download/status``.
+_state_lock = threading.RLock()
 _download_status: dict[str, object] = {
+    "state": "idle",
     "downloading": False,
     "progress": 0.0,
     "speed": 0.0,
     "error": None,
+    "message": "Ready",
 }
-
-#: Path to the downloaded model (set after successful download or local
-#: path validation).  ``None`` means the model has not been located yet.
 _downloaded_model_path: str | None = None
-
-#: Serialises download-start checks.
-_download_lock = threading.Lock()
-
-#: Cancellation flag — set by :func:`cancel_download`, polled by the
-#: download worker thread.  Reset to ``False`` at the start of each new
-#: download.
-_cancel_requested: bool = False
-
-#: Lock protecting :data:`_cancel_requested`.
-_cancel_lock = threading.Lock()
+_cancel_requested = False
+_download_generation = 0
 
 
-# ── Public API ─────────────────────────────────────────────────────
+def _snapshot_status() -> dict[str, object]:
+    with _state_lock:
+        return dict(_download_status)
+
+
+def _set_status(**updates: object) -> None:
+    with _state_lock:
+        _download_status.update(updates)
+
+
+def _marker_path(model_dir: str | os.PathLike | None = None) -> Path:
+    return Path(model_dir or config.MODEL_DIR) / _MODEL_MARKER
+
+
+def _write_marker(path: str, model_dir: str | os.PathLike | None = None) -> None:
+    marker = _marker_path(model_dir)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    temporary = marker.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"path": str(Path(path).resolve())}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.replace(temporary, marker)
+
+
+def _read_marker(model_dir: str | os.PathLike | None = None) -> str | None:
+    try:
+        value = json.loads(_marker_path(model_dir).read_text(encoding="utf-8"))
+        path = value.get("path")
+        return str(path) if path else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _candidate_model_dirs(model_dir: str | os.PathLike | None = None) -> list[Path]:
+    base = Path(model_dir or config.MODEL_DIR)
+    org, _, name = config.MODEL_NAME.partition("/")
+    candidates = [
+        base / config.MODEL_SUBDIR,
+        base / config.MODEL_NAME.replace("/", "_"),
+        base / org / name if name else base / org,
+        base / config.MODEL_NAME.replace("/", os.sep),
+    ]
+    # Backward compatibility for earlier HuggingFace cache downloads.
+    if name:
+        candidates.append(
+            base / f"models--{org}--{name}" / "snapshots"
+        )
+    return candidates
 
 
 def is_model_downloaded(model_dir: str | os.PathLike | None = None) -> bool:
-    """Return ``True`` when the model appears to be present on disk.
-
-    Checks several candidate locations:
-
-    1. ``_downloaded_model_path`` (set after a successful download).
-    2. ``model_dir / MODEL_SUBDIR`` (direct sub-directory).
-    3. ``model_dir / <org> / MODEL_SUBDIR`` (HF / ModelScope cache layout).
-    4. ``model_dir / MODEL_NAME`` with ``/`` replaced by ``_``.
-
-    A directory is considered a valid model if it contains
-    ``config.json``.
-    """
+    """Discover a complete local model and remember its concrete path."""
     global _downloaded_model_path
 
-    # 1. Already known path
-    if _downloaded_model_path and _is_valid_model_dir(_downloaded_model_path):
+    with _state_lock:
+        known = _downloaded_model_path
+    if known and _is_valid_model_dir(known):
         return True
 
-    if model_dir is None:
-        model_dir = config.MODEL_DIR
-    model_dir = Path(model_dir)
+    marked = _read_marker(model_dir)
+    if marked and _is_valid_model_dir(marked):
+        with _state_lock:
+            _downloaded_model_path = marked
+        return True
 
-    model_subdir = config.MODEL_SUBDIR
-    org_name = config.MODEL_NAME.split("/")[0] if "/" in config.MODEL_NAME else ""
-
-    candidates: list[Path] = [
-        model_dir / model_subdir,
-        model_dir / org_name / model_subdir if org_name else model_dir / model_subdir,
-        model_dir / config.MODEL_NAME.replace("/", "_"),
-        model_dir / config.MODEL_NAME.replace("/", os.sep),
-    ]
-
-    for candidate in candidates:
-        if _is_valid_model_dir(candidate):
-            _downloaded_model_path = str(candidate)
-            logger.info("Model found at %s", _downloaded_model_path)
+    for candidate in _candidate_model_dirs(model_dir):
+        if candidate.name == "snapshots" and candidate.is_dir():
+            try:
+                snapshot_dirs = sorted(
+                    (item for item in candidate.iterdir() if item.is_dir()),
+                    key=lambda item: item.stat().st_mtime,
+                    reverse=True,
+                )
+            except OSError:
+                snapshot_dirs = []
+            for snapshot in snapshot_dirs:
+                if _is_valid_model_dir(snapshot):
+                    with _state_lock:
+                        _downloaded_model_path = str(snapshot.resolve())
+                    _write_marker(_downloaded_model_path, model_dir)
+                    return True
+        elif _is_valid_model_dir(candidate):
+            with _state_lock:
+                _downloaded_model_path = str(candidate.resolve())
+            _write_marker(_downloaded_model_path, model_dir)
             return True
-
     return False
 
 
 def get_downloaded_model_path() -> str | None:
-    """Return the local filesystem path of the model, or ``None``."""
-    global _downloaded_model_path
-
-    if _downloaded_model_path and _is_valid_model_dir(_downloaded_model_path):
-        return _downloaded_model_path
-
-    # Try to discover the path
-    if is_model_downloaded():
-        return _downloaded_model_path
-
-    return None
+    with _state_lock:
+        known = _downloaded_model_path
+    if known and _is_valid_model_dir(known):
+        return known
+    return _downloaded_model_path if is_model_downloaded() else None
 
 
 def get_download_status() -> dict[str, object]:
-    """Return a snapshot of the current download status."""
-    return dict(_download_status)
+    return _snapshot_status()
+
+
+def is_valid_model_dir(path: str | os.PathLike) -> bool:
+    return _is_valid_model_dir(path)
 
 
 def cancel_download() -> bool:
-    """Request cancellation of an in-progress download.
-
-    Sets a flag that the download worker checks between operations.  The
-    actual SDK download (modelscope / huggingface_hub) may take a moment
-    to terminate, but the UI can immediately reflect the cancelled state.
-
-    Returns ``True`` if a cancellation was requested (i.e. a download was
-    in progress), ``False`` if no download was running.
-    """
+    """Request cancellation without advertising completion prematurely."""
     global _cancel_requested
-
-    with _cancel_lock:
-        if not _download_status["downloading"]:
+    with _state_lock:
+        if not bool(_download_status["downloading"]):
             return False
         _cancel_requested = True
-        logger.info("Download cancellation requested")
-
-    # Reflect the cancellation immediately in the public status so the UI
-    # can stop its progress polling without waiting for the worker thread
-    # to wind down.
-    _download_status["downloading"] = False
-    _download_status["error"] = "Download cancelled by user"
+        _download_status.update(
+            state="cancelling",
+            message="Cancelling download…",
+            error=None,
+        )
+    logger.info("Model download cancellation requested")
     return True
 
 
-def _is_cancel_requested() -> bool:
-    """Thread-safe check of the cancellation flag."""
-    with _cancel_lock:
+def _is_cancel_requested(generation: int | None = None) -> bool:
+    with _state_lock:
+        if generation is not None and generation != _download_generation:
+            return True
         return _cancel_requested
-
-
-def _reset_cancel_flag() -> None:
-    """Reset the cancellation flag at the start of a new download."""
-    global _cancel_requested
-    with _cancel_lock:
-        _cancel_requested = False
 
 
 def start_download(
@@ -161,30 +166,50 @@ def start_download(
     model_dir: str | os.PathLike | None = None,
     local_path: str | None = None,
 ) -> bool:
-    """Start a background download.
+    """Validate input and start exactly one background operation."""
+    global _cancel_requested, _download_generation
 
-    Returns ``True`` if the download was started, ``False`` if another
-    download is already in progress.
-    """
-    with _download_lock:
-        if _download_status["downloading"]:
+    source = source.strip().lower()
+    if source not in _VALID_SOURCES:
+        raise ValueError(f"Unsupported model source: {source}")
+    if source == "local":
+        if not local_path:
+            raise ValueError("A local model directory is required")
+        if not _is_valid_model_dir(local_path):
+            raise ValueError("The selected directory is not a complete model")
+
+    target_root = Path(model_dir or config.MODEL_DIR)
+    target_root.mkdir(parents=True, exist_ok=True)
+    if source != "local":
+        free_bytes = shutil.disk_usage(target_root).free
+        required = max(_EXPECTED_SIZE, 1_500_000_000)
+        if free_bytes < required:
+            raise OSError(
+                f"Not enough disk space: {free_bytes / 1024**3:.1f} GiB free, "
+                f"at least {required / 1024**3:.1f} GiB required"
+            )
+
+    with _state_lock:
+        if bool(_download_status["downloading"]):
             return False
+        _download_generation += 1
+        generation = _download_generation
+        _cancel_requested = False
+        _download_status.update(
+            state="downloading",
+            downloading=True,
+            progress=0.0,
+            speed=0.0,
+            error=None,
+            message="Validating local model…" if source == "local" else "Downloading model…",
+        )
 
-        _reset_cancel_flag()
-        _download_status["downloading"] = True
-        _download_status["progress"] = 0.0
-        _download_status["speed"] = 0.0
-        _download_status["error"] = None
-
-    if model_dir is None:
-        model_dir = config.MODEL_DIR
-
-    thread = threading.Thread(
+    threading.Thread(
         target=_download_worker,
-        args=(source, str(model_dir), local_path),
+        args=(generation, source, str(target_root), local_path),
         daemon=True,
-    )
-    thread.start()
+        name=f"model-download-{generation}",
+    ).start()
     return True
 
 
@@ -193,164 +218,153 @@ def download_model(
     model_dir: str | os.PathLike,
     local_path: str | None = None,
 ) -> str:
-    """Synchronously download (or validate) the model.
-
-    This is the blocking implementation called by :func:`start_download`
-    in a background thread.  It can also be called directly from scripts.
-
-    Returns the local path to the model directory.
-    """
-    global _downloaded_model_path
-
-    model_dir = str(model_dir)
+    """Synchronously download to a deterministic directory or validate local data."""
+    target = Path(model_dir) / config.MODEL_SUBDIR
+    target.parent.mkdir(parents=True, exist_ok=True)
 
     if source == "modelscope":
-        logger.info("Downloading %s from ModelScope to %s", config.MODEL_NAME, model_dir)
         from modelscope import snapshot_download
 
         path = snapshot_download(
             model_id=config.MODEL_NAME,
-            cache_dir=model_dir,
+            local_dir=str(target),
         )
-        _downloaded_model_path = str(path)
-
     elif source == "huggingface":
-        logger.info(
-            "Downloading %s from HuggingFace to %s", config.MODEL_NAME, model_dir
-        )
-        from huggingface_hub import snapshot_download as hf_snapshot_download
+        from huggingface_hub import snapshot_download
 
-        path = hf_snapshot_download(
+        path = snapshot_download(
             repo_id=config.MODEL_NAME,
-            cache_dir=model_dir,
+            local_dir=str(target),
         )
-        _downloaded_model_path = str(path)
-
     elif source == "local":
-        if not local_path or not os.path.isdir(local_path):
-            raise ValueError(
-                "source='local' requires a valid local_path directory"
-            )
-        if not _is_valid_model_dir(local_path):
-            raise ValueError(
-                f"local_path '{local_path}' does not contain a valid model "
-                f"(missing config.json)"
-            )
-        _downloaded_model_path = local_path
-        logger.info("Using local model at %s", local_path)
-
+        if not local_path or not _is_valid_model_dir(local_path):
+            raise ValueError("The selected directory is not a complete model")
+        path = str(Path(local_path).resolve())
     else:
-        raise ValueError(
-            f"Unknown source '{source}'. "
-            f"Expected 'modelscope', 'huggingface', or 'local'."
-        )
+        raise ValueError(f"Unsupported model source: {source}")
 
-    return _downloaded_model_path
-
-
-# ── Internal helpers ───────────────────────────────────────────────
+    if not _is_valid_model_dir(path):
+        raise RuntimeError("Download finished but required model files are missing")
+    return str(Path(path).resolve())
 
 
 def _download_worker(
+    generation: int,
     source: str,
     model_dir: str,
     local_path: str | None,
 ) -> None:
-    """Background thread: run download with progress monitoring."""
     global _downloaded_model_path
 
-    # For hub downloads, monitor directory growth in a separate thread
     monitor_stop = threading.Event()
-    if source in ("modelscope", "huggingface"):
-        monitor_thread = threading.Thread(
+    monitor: threading.Thread | None = None
+    if source != "local":
+        monitor = threading.Thread(
             target=_monitor_progress,
-            args=(model_dir, monitor_stop),
+            args=(generation, model_dir, monitor_stop),
             daemon=True,
+            name=f"model-progress-{generation}",
         )
-        monitor_thread.start()
+        monitor.start()
 
     try:
-        # Check cancellation before kicking off the (potentially heavy) SDK call
-        if _is_cancel_requested():
-            logger.info("Download cancelled before start")
-            return
-
+        if _is_cancel_requested(generation):
+            raise InterruptedError("Download cancelled")
         path = download_model(source, model_dir, local_path)
-
-        # Check cancellation again after the SDK returns (the SDK may have
-        # completed despite a cancel request — in that case we still honor
-        # the user's intent and discard the result).
-        if _is_cancel_requested():
-            logger.info("Download completed but cancellation was requested — discarding")
-            _downloaded_model_path = None
-            return
-
-        _downloaded_model_path = path
-        _download_status["progress"] = 100.0
-        _download_status["speed"] = 0.0
-        _download_status["error"] = None
-        logger.info("Model download complete: %s", path)
+        if _is_cancel_requested(generation):
+            raise InterruptedError("Download cancelled")
+        _write_marker(path, model_dir)
+        with _state_lock:
+            if generation == _download_generation:
+                _downloaded_model_path = path
+                _download_status.update(
+                    state="completed",
+                    downloading=False,
+                    progress=100.0,
+                    speed=0.0,
+                    error=None,
+                    message="Model is ready",
+                )
+        logger.info("Model is ready at %s", path)
+    except InterruptedError:
+        with _state_lock:
+            if generation == _download_generation:
+                _download_status.update(
+                    state="cancelled",
+                    downloading=False,
+                    speed=0.0,
+                    error=None,
+                    message="Download cancelled",
+                )
     except Exception as exc:
-        if _is_cancel_requested():
-            _download_status["error"] = "Download cancelled by user"
-            logger.info("Model download cancelled")
-        else:
-            _download_status["error"] = str(exc)
-            logger.error("Model download failed: %s", exc, exc_info=True)
+        with _state_lock:
+            if generation == _download_generation:
+                _download_status.update(
+                    state="error",
+                    downloading=False,
+                    speed=0.0,
+                    error=str(exc),
+                    message=f"Download failed: {exc}",
+                )
+        logger.error("Model download failed: %s", exc, exc_info=True)
     finally:
         monitor_stop.set()
-        _download_status["downloading"] = False
+        if monitor and monitor is not threading.current_thread():
+            monitor.join(timeout=1.5)
+        with _state_lock:
+            if generation == _download_generation:
+                _download_status["downloading"] = False
 
 
-def _monitor_progress(target_dir: str, stop_event: threading.Event) -> None:
-    """Periodically estimate download progress from directory size."""
-    last_size = 0
-    last_time = time.time()
-
-    while not stop_event.wait(0.5):
-        # Stop monitoring if the download was cancelled
-        if _is_cancel_requested():
+def _monitor_progress(
+    generation: int,
+    target_dir: str,
+    stop_event: threading.Event,
+) -> None:
+    last_size = _get_dir_size(target_dir)
+    last_time = time.monotonic()
+    while not stop_event.wait(0.75):
+        if _is_cancel_requested(generation):
             return
-
         try:
             current_size = _get_dir_size(target_dir)
-            now = time.time()
-            dt = now - last_time
+            now = time.monotonic()
+            elapsed = max(now - last_time, 0.001)
+            progress = (
+                min(99.0, current_size / _EXPECTED_SIZE * 100.0)
+                if _EXPECTED_SIZE > 0
+                else 0.0
+            )
+            _set_status(
+                progress=progress,
+                speed=max(0.0, (current_size - last_size) / elapsed),
+            )
+            last_size, last_time = current_size, now
+        except OSError:
+            logger.debug("Unable to inspect download directory", exc_info=True)
 
-            if dt > 0:
-                speed = (current_size - last_size) / dt
-                _download_status["speed"] = max(0.0, speed)
 
-            last_size = current_size
-            last_time = now
-
-            if _EXPECTED_SIZE > 0:
-                progress = min(99.0, (current_size / _EXPECTED_SIZE) * 100.0)
-                _download_status["progress"] = progress
-        except Exception:
-            pass
-
-
-def _get_dir_size(path: str) -> int:
-    """Return total size in bytes of all files under *path*."""
+def _get_dir_size(path: str | os.PathLike) -> int:
     total = 0
-    if not os.path.isdir(path):
-        return total
-    for dirpath, _dirnames, filenames in os.walk(path):
-        for f in filenames:
-            fp = os.path.join(dirpath, f)
+    try:
+        for entry in Path(path).rglob("*"):
             try:
-                if not os.path.islink(fp):
-                    total += os.path.getsize(fp)
+                if entry.is_file() and not entry.is_symlink():
+                    total += entry.stat().st_size
             except OSError:
-                pass
+                continue
+    except OSError:
+        pass
     return total
 
 
 def _is_valid_model_dir(path: str | os.PathLike) -> bool:
-    """Return ``True`` if *path* is a directory containing ``config.json``."""
+    """Require both metadata and at least one plausible model weight file."""
     try:
-        p = Path(path)
-        return p.is_dir() and (p / "config.json").is_file()
+        candidate = Path(path)
+        if not candidate.is_dir() or not (candidate / "config.json").is_file():
+            return False
+        patterns = ("*.safetensors", "*.bin", "*.pt", "*.pth")
+        return any(next(candidate.glob(pattern), None) is not None for pattern in patterns)
     except (OSError, ValueError):
         return False

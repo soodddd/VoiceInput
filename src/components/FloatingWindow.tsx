@@ -1,11 +1,11 @@
 /**
  * VoiceInput v2 — 悬浮窗组件
  * 交互模式：
- *   - 点击麦克风按钮：开始/停止录音（toggle模式）
- *   - 按住麦克风按钮：按住说话，松开停止
+ *   - 点击麦克风按钮：开始/停止录音（toggle 模式）
+ *   - 全局快捷键：按住说话，松开停止
  */
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { MicIcon, StopIcon, CopyIcon, TrashIcon, SendIcon, GlobeIcon, CogIcon, ErrorIcon, SpinnerIcon, CloseIcon } from './Icons';
 import { WaveformWidget } from './WaveformWidget';
@@ -49,26 +49,9 @@ export function FloatingWindow({
 }: FloatingWindowProps) {
   const [copied, setCopied] = useState(false);
 
-  const statusRef = useRef<AppStatus>(status);
-  const buttonHeldRef = useRef(false);
-  const clickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    statusRef.current = status;
-  }, [status]);
-
-  useEffect(() => {
-    return () => {
-      if (clickTimeoutRef.current) {
-        clearTimeout(clickTimeoutRef.current);
-      }
-    };
-  }, []);
-
   const isRecording = status === 'recording';
   const isProcessing = status === 'processing';
   const isResult = status === 'result';
-  const isIdle = status === 'idle';
   const isError = status === 'error';
 
   const toggleLanguage = useCallback(() => {
@@ -114,70 +97,25 @@ export function FloatingWindow({
     }
   }, [resultText]);
 
-  const handleErrorClick = useCallback(() => {
-    if (isError) {
-      onClearResult();
-    }
-  }, [isError, onClearResult]);
-
-  const doStartRecording = useCallback(() => {
-    if (statusRef.current === 'processing' || statusRef.current === 'recording') return;
-    return manualStart();
-  }, [manualStart]);
-
-  const doStopRecording = useCallback(() => {
-    if (statusRef.current === 'recording') {
-      return manualStop();
-    }
-    return Promise.resolve();
-  }, [manualStop]);
-
-  const handleMicMouseDown = useCallback(() => {
+  const handleMicClick = useCallback(() => {
     if (isProcessing) return;
-    buttonHeldRef.current = true;
-
     if (isRecording) {
-      void doStopRecording();
-      buttonHeldRef.current = false;
+      void manualStop();
       return;
     }
-
-    if (isError || isResult || isIdle) {
-      clickTimeoutRef.current = setTimeout(() => {
-        if (buttonHeldRef.current && statusRef.current !== 'recording') {
-          void doStartRecording();
-        }
-      }, 150);
+    if (isError || isResult) {
+      onClearResult();
     }
-  }, [isProcessing, isRecording, isError, isResult, isIdle, doStartRecording, doStopRecording]);
-
-  const handleMicMouseUp = useCallback(() => {
-    if (clickTimeoutRef.current) {
-      clearTimeout(clickTimeoutRef.current);
-      clickTimeoutRef.current = null;
-    }
-
-    if (!buttonHeldRef.current) return;
-
-    if (statusRef.current === 'recording') {
-      void doStopRecording();
-    } else if (!isProcessing && !isRecording) {
-      void doStartRecording();
-    }
-
-    buttonHeldRef.current = false;
-  }, [isProcessing, isRecording, doStartRecording, doStopRecording]);
-
-  const handleMicMouseLeave = useCallback(() => {
-    if (clickTimeoutRef.current) {
-      clearTimeout(clickTimeoutRef.current);
-      clickTimeoutRef.current = null;
-    }
-    if (buttonHeldRef.current && statusRef.current === 'recording') {
-      void doStopRecording();
-    }
-    buttonHeldRef.current = false;
-  }, [doStopRecording]);
+    void manualStart();
+  }, [
+    isProcessing,
+    isRecording,
+    isError,
+    isResult,
+    manualStart,
+    manualStop,
+    onClearResult,
+  ]);
 
   const micBgColor = isRecording
     ? '#EF4444'
@@ -196,7 +134,7 @@ export function FloatingWindow({
     : '0 4px 20px rgba(37,99,235,0.35)';
 
   const statusHint = isRecording
-    ? '录音中 · 点击或松开停止'
+    ? '录音中 · 点击停止'
     : isProcessing
     ? '正在识别...'
     : isError
@@ -346,12 +284,7 @@ export function FloatingWindow({
         {/* 麦克风按钮 */}
         <button
           type="button"
-          onMouseDown={handleMicMouseDown}
-          onMouseUp={handleMicMouseUp}
-          onMouseLeave={handleMicMouseLeave}
-          onTouchStart={(e) => { e.preventDefault(); handleMicMouseDown(); }}
-          onTouchEnd={(e) => { e.preventDefault(); handleMicMouseUp(); }}
-          onClick={isError ? handleErrorClick : undefined}
+          onClick={handleMicClick}
           className="flex items-center justify-center rounded-full select-none"
           style={{
             width: isRecording ? '64px' : '56px',
@@ -398,6 +331,20 @@ export function FloatingWindow({
             style={{
               fontSize: '10px', color: '#DC2626',
               backgroundColor: 'rgba(239,68,68,0.06)',
+              lineHeight: 1.4,
+            }}
+          >
+            {errorMessage}
+          </div>
+        )}
+
+        {isResult && errorMessage && (
+          <div
+            className="mt-1.5 w-full rounded-lg px-2.5 py-1 text-center"
+            style={{
+              fontSize: '10px',
+              color: '#92400E',
+              backgroundColor: '#FFFBEB',
               lineHeight: 1.4,
             }}
           >

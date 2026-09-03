@@ -33,7 +33,7 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 - 🩺 **自动恢复** — 后端崩溃自动重启 + 文件日志
 - 🖥️ **系统托盘** — 快速访问设置、日志和退出
 - ⚡ **VAD 静音停止** — 检测到静音自动停止录音
-- 📋 **智能粘贴** — 自动粘贴到光标位置，之后恢复你原来的剪贴板
+- 📋 **安全输入** — 自动返回原光标窗口并输入文字，不修改图片、文件或文本剪贴板
 - 🔄 **更新检查** — 有新版本时自动提醒你
 
 ---
@@ -44,7 +44,7 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 |------|------|
 | 操作系统 | Windows 10 1903+ / Windows 11 |
 | 显卡 | **NVIDIA** 显卡，支持 CUDA，显存 ≥ 4 GB |
-| 硬盘 | 约 200 MB 程序 + 约 1.2 GB 模型（只需下载一次） |
+| 硬盘 | 约 2.7 GB 运行时 + 约 1.9 GB 模型；建议预留 6 GB |
 | 内存 | 8 GB 以上 |
 | 输入设备 | 麦克风（笔记本自带或外接都行） |
 
@@ -78,7 +78,7 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 
 ### 第四步：下载模型（只有第一次需要）
 
-第一次运行 VoiceInput 时，需要下载 AI 模型（大约 1.2 GB）。**这只需要做一次**。
+第一次运行 VoiceInput 时，需要下载 AI 模型（大约 1.9 GB）。**这只需要做一次**。
 
 1. 程序会显示下载界面
 2. 选择 **ModelScope**（推荐国内用户，速度快）或 **HuggingFace**（国际用户）
@@ -153,7 +153,7 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 - **中英自动空格**：在中文和英文之间自动加空格
 - **VAD 静音检测**：检测到 2 秒静音后自动停止录音
 - **开机自启**：开机后自动启动 VoiceInput
-- 粘贴延迟、恢复剪贴板、最大录音时长、请求超时
+- 输入延迟、最大录音时长、请求超时（自动输入不会修改剪贴板）
 
 ### 术语 标签页
 添加自定义词语纠正。比如如果 AI 总是把你的名字"小明"识别成"小名"，可以加一条规则纠正它。
@@ -192,7 +192,7 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 
 ### 前置要求
 
-- [Node.js](https://nodejs.org/) 18+ 和 npm
+- [Node.js](https://nodejs.org/) 20.19+ 和 npm
 - [Rust](https://rustup.rs/)（stable 工具链）
 - Python 3.10+ 及后端依赖（`torch`、`fastapi`、`qwen_asr` 等）
 - [Tauri CLI 2.x](https://tauri.app/)（`npm install -D @tauri-apps/cli`）
@@ -204,19 +204,23 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 # 1. 安装前端依赖
 npm install
 
-# 2. 构建 Python ASR 后端（PyInstaller onefile → src-tauri/binaries/）
+# 2. 在专用 Python 构建环境安装后端依赖和固定版本打包器
+python -m pip install -r backend\requirements.txt
+python -m pip install pyinstaller==6.22.1
+
+# 3. 构建 Python ASR 后端（PyInstaller onedir → src-tauri/binaries/asr_backend/）
 .\build_backend.bat
 
-# 3. 开发模式运行
-npm run tauri dev
+# 4. 构建 Tauri 主程序
+npm run tauri build -- --no-bundle
 
-# 4. 构建发布 zip（voiceinput.exe + sidecar + 资源）
+# 5. 构建并从全新解压目录验证发布 zip
 powershell -ExecutionPolicy Bypass -File .\build_release_zip.ps1
 ```
 
 发布的 zip 输出到 `.\release\VoiceInput-v0.1.2-preview-win64.zip`。
 
-> **关于 NSIS** — PyInstaller onefile 打包的 sidecar 约 2.7 GB（包含 torch + transformers），超过了 NSIS 的 mmap 限制。项目改用 zip 分发方案。详见 `build_release_zip.ps1`。
+> **打包说明** — 后端使用 onedir 运行时（包含 torch 与 transformers，约 2.7 GB），避免每次启动都解压超大单文件。项目使用 ZIP 分发，必须让 `asr_backend/_internal` 与 `asr_backend.exe` 保持原有相对位置。
 
 ---
 

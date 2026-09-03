@@ -1,9 +1,10 @@
 //! VoiceInput v2 — Token 生成与管理
 //!
 //! 生成随机 UUID v4 token，用于 Rust 层与 Python sidecar 之间的鉴权。
-//! Token 存储在配置文件中，首次启动自动生成并持久化。
+//! Token is generated for each application process and is never persisted or
+//! exposed to the WebView.
 
-use crate::config::{self, AppConfig};
+use crate::config::AppConfig;
 use uuid::Uuid;
 
 /// 生成一个新的 UUID v4 token 字符串（无连字符的大写格式）。
@@ -24,11 +25,7 @@ pub fn ensure_token(config: &mut AppConfig) -> String {
     if config.token.is_none() || config.token.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
         let new_token = generate_token();
         config.token = Some(new_token.clone());
-        // 保存到磁盘
-        if let Err(e) = config::save_config(config) {
-            log::warn!("保存 token 到配置文件失败: {}", e);
-        }
-        log::info!("已生成新 token 并保存");
+        log::info!("已生成本次运行使用的本地鉴权 token");
         new_token
     } else {
         config.token.clone().unwrap_or_default()

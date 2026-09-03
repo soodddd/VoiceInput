@@ -33,7 +33,7 @@ It works in **any program** — Word, WeChat, browser search boxes, games, anywh
 - 🩺 **Auto-recovery** — Backend crash auto-restart + file logging
 - 🖥️ **System tray** — Quick access to settings, logs, and quit
 - ⚡ **VAD auto-stop** — Detects silence and stops recording automatically
-- 📋 **Smart paste** — Auto-pastes text at cursor, restores your clipboard after
+- 📋 **Clipboard-safe input** — Returns to the prior window and types without altering clipboard data
 - 🔄 **Update check** — Notifies you when a new version is available
 
 ---
@@ -44,7 +44,7 @@ It works in **any program** — Word, WeChat, browser search boxes, games, anywh
 |-------------|--------|
 | OS | Windows 10 1903+ / Windows 11 |
 | GPU | **NVIDIA** graphics card with CUDA support, ≥ 4 GB VRAM |
-| Disk | ~200 MB app + ~1.2 GB model (downloaded once) |
+| Disk | ~2.7 GB runtime + ~1.9 GB model (downloaded once); keep 6 GB free |
 | RAM | 8 GB+ |
 | Input | A microphone (built-in or external) |
 
@@ -78,7 +78,7 @@ It works in **any program** — Word, WeChat, browser search boxes, games, anywh
 
 ### Step 4: Download the Model (First Launch Only)
 
-The first time you run VoiceInput, it needs to download the AI model (about 1.2 GB). This happens only once.
+The first time you run VoiceInput, it needs to download the AI model (about 1.9 GB). This happens only once.
 
 1. The app will show a download screen
 2. Choose **ModelScope** (recommended, faster for China) or **HuggingFace** (international)
@@ -153,7 +153,7 @@ Adjust sample rate, audio normalization, silence trimming, and silence threshold
 - **Auto space (Chinese-English)**: Adds spaces between Chinese and English
 - **VAD silence detection**: Automatically stops recording after 2 seconds of silence
 - **Auto-start on boot**: Start VoiceInput when Windows starts
-- Paste delay, clipboard restore, max recording time, request timeout
+- Input delay, max recording time, request timeout (automatic input does not touch the clipboard)
 
 ### Terms Tab
 Add custom word corrections. For example, if the AI always mishears your name "Xiaoming" as "Xiao Ming", add a rule to fix it.
@@ -192,7 +192,7 @@ Add custom word corrections. For example, if the AI always mishears your name "X
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) 18+ and npm
+- [Node.js](https://nodejs.org/) 20.19+ and npm
 - [Rust](https://rustup.rs/) (stable toolchain)
 - Python 3.10+ with backend dependencies (`torch`, `fastapi`, `qwen_asr`, ...)
 - [Tauri CLI 2.x](https://tauri.app/) (`npm install -D @tauri-apps/cli`)
@@ -204,19 +204,23 @@ Add custom word corrections. For example, if the AI always mishears your name "X
 # 1. Install frontend dependencies
 npm install
 
-# 2. Build the Python ASR backend (PyInstaller onefile → src-tauri/binaries/)
+# 2. Install backend dependencies and a fixed packager in a dedicated environment
+python -m pip install -r backend\requirements.txt
+python -m pip install pyinstaller==6.22.1
+
+# 3. Build the Python ASR backend (PyInstaller onedir → src-tauri/binaries/asr_backend/)
 .\build_backend.bat
 
-# 3. Run in development mode
-npm run tauri dev
+# 4. Build the Tauri executable
+npm run tauri build -- --no-bundle
 
-# 4. Build the release zip (voiceinput.exe + sidecar + resources)
+# 5. Build and fresh-extraction validate the release zip
 powershell -ExecutionPolicy Bypass -File .\build_release_zip.ps1
 ```
 
 The release zip is output to `.\release\VoiceInput-v0.1.2-preview-win64.zip`.
 
-> **Note on NSIS** — The PyInstaller onefile sidecar is ~2.7 GB (bundling torch + transformers), which exceeds NSIS's mmap limit. The project ships a zip distribution instead. See `build_release_zip.ps1`.
+> **Packaging note** — The backend is an onedir runtime (~2.7 GB including torch and transformers) to avoid unpacking a giant executable on every launch. The project ships a ZIP; keep the complete `asr_backend/_internal` directory beside `asr_backend.exe`.
 
 ---
 

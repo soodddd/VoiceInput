@@ -12,16 +12,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use tauri::{AppHandle, Emitter};
 
-/// 当前活跃监听器的标志位存储。
-///
-/// 采用「代际失效」策略：调用 `start_hotkey_listener` 时，会先将旧标志位
-/// 置为 false，使旧的 rdev 回调变为 no-op（rdev::listen 阻塞无法直接停止，
-/// 因此只让它静默），然后安装新的标志位。
-static ACTIVE_FLAG: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
+static LISTENER_STARTED: AtomicBool = AtomicBool::new(false);
+static HOTKEYS: OnceLock<Mutex<Option<(HotkeyCombo, HotkeyCombo)>>> = OnceLock::new();
 
-/// 获取全局活跃标志位存储（首次调用时初始化）。
-fn active_flag_storage() -> &'static Mutex<Option<Arc<AtomicBool>>> {
-    ACTIVE_FLAG.get_or_init(|| Mutex::new(None))
+fn hotkey_storage() -> &'static Mutex<Option<(HotkeyCombo, HotkeyCombo)>> {
+    HOTKEYS.get_or_init(|| Mutex::new(None))
 }
 
 /// 修饰键组合
@@ -114,9 +109,16 @@ fn parse_hotkey(hotkey_str: &str) -> Result<HotkeyCombo, String> {
     }
 
     let key_str = parts[parts.len() - 1];
+    if modifiers.is_empty() {
+        return Err("全局快捷键至少需要一个修饰键".to_string());
+    }
     let key = parse_key(key_str)?;
 
     Ok(HotkeyCombo { modifiers, key })
+}
+
+pub fn validate_hotkey(hotkey: &str) -> Result<(), String> {
+    parse_hotkey(hotkey).map(|_| ())
 }
 
 /// 将字符串键名解析为 rdev::Key
@@ -163,6 +165,16 @@ fn parse_key(s: &str) -> Result<Key, String> {
         "esc" | "escape" => Key::Escape,
         "tab" => Key::Tab,
         "backspace" => Key::Backspace,
+        "delete" => Key::Delete,
+        "insert" => Key::Insert,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "pageup" => Key::PageUp,
+        "pagedown" => Key::PageDown,
+        "up" => Key::UpArrow,
+        "down" => Key::DownArrow,
+        "left" => Key::LeftArrow,
+        "right" => Key::RightArrow,
         "f1" => Key::F1,
         "f2" => Key::F2,
         "f3" => Key::F3,
@@ -186,26 +198,6 @@ fn parse_key(s: &str) -> Result<Key, String> {
 /// 变为 no-op（rdev::listen 阻塞无法直接停止），然后安装新的标志位并
 /// 启动新线程。因此重复调用此函数即可实现热重载。
 pub fn start_hotkey_listener(app: AppHandle, config: AppConfig) {
-    // 失效旧的监听器
-    {
-        let storage = active_flag_storage();
-        if let Ok(mut guard) = storage.lock() {
-            if let Some(old_flag) = guard.take() {
-                old_flag.store(false, Ordering::SeqCst);
-                log::info!("已停用旧的快捷键监听器");
-            }
-        }
-    }
-
-    // 创建新的活跃标志位并存储
-    let active = Arc::new(AtomicBool::new(true));
-    {
-        let storage = active_flag_storage();
-        if let Ok(mut guard) = storage.lock() {
-            *guard = Some(active.clone());
-        }
-    }
-
     let main_hotkey = match parse_hotkey(&config.hotkey) {
         Ok(k) => k,
         Err(e) => {
@@ -225,14 +217,24 @@ pub fn start_hotkey_listener(app: AppHandle, config: AppConfig) {
             return;
         }
     };
+    if main_hotkey == lang_hotkey {
+        log::error!("主快捷键和语言快捷键不能相同");
+        return;
+    }
+    if let Ok(mut current) = hotkey_storage().lock() {
+        *current = Some((main_hotkey.clone(), lang_hotkey.clone()));
+    }
 
     log::info!(
-        "启动快捷键监听: 主键={:?}+{:?}, 语言键={:?}+{:?}",
+        "快捷键配置已应用: 主键={:?}+{:?}, 语言键={:?}+{:?}",
         main_hotkey.modifiers,
         main_hotkey.key,
         lang_hotkey.modifiers,
         lang_hotkey.key
     );
+    if LISTENER_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
 
     // 防抖标志：防止 KeyPress 重复触发
     let main_active = Arc::new(AtomicBool::new(false));
@@ -245,14 +247,16 @@ pub fn start_hotkey_listener(app: AppHandle, config: AppConfig) {
     let main_active_clone = main_active.clone();
     let lang_active_clone = lang_active.clone();
     let mod_state_clone = mod_state.clone();
-    let active_clone = active.clone();
 
     thread::spawn(move || {
         let callback = move |event: Event| {
-            // 若本代监听器已被停用，直接忽略所有事件
-            if !active_clone.load(Ordering::SeqCst) {
+            let current = hotkey_storage()
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone());
+            let Some((main_hotkey, lang_hotkey)) = current else {
                 return;
-            }
+            };
 
             // 更新修饰键状态
             match event.event_type {
@@ -325,12 +329,8 @@ pub fn start_hotkey_listener(app: AppHandle, config: AppConfig) {
 /// 将当前活跃标志位置为 false 使旧 rdev 回调变为 no-op，
 /// 并清空存储，表示没有活跃监听器。
 pub fn stop_hotkey_listener() {
-    let storage = active_flag_storage();
-    if let Ok(mut guard) = storage.lock() {
-        if let Some(old_flag) = guard.take() {
-            old_flag.store(false, Ordering::SeqCst);
-            log::info!("已停用快捷键监听器");
-        }
+    if let Ok(mut current) = hotkey_storage().lock() {
+        *current = None;
     }
 }
 
@@ -338,8 +338,7 @@ pub fn stop_hotkey_listener() {
 ///
 /// 先停用旧回调，再使用最新配置启动新回调。
 pub fn restart_hotkey_listener(app: AppHandle, config: AppConfig) {
-    log::info!("重启快捷键监听以应用新配置...");
-    stop_hotkey_listener();
+    log::info!("热更新快捷键配置...");
     start_hotkey_listener(app, config);
 }
 
@@ -368,8 +367,10 @@ mod tests {
 
     #[test]
     fn test_modifier_state_match() {
-        let mut state = ModifierState::default();
-        state.alt = true;
+        let mut state = ModifierState {
+            alt: true,
+            ..ModifierState::default()
+        };
 
         let target = vec![Modifier::Alt];
         assert!(state.is_match(&target));

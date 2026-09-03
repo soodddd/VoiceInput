@@ -1,19 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for VoiceInput ASR Backend.
 
-Builds asr_backend.exe as a single-file executable (onefile mode) from
-the Python backend, including all runtime dependencies (torch, fastapi,
-uvicorn, qwen_asr, etc.).
+Builds an onedir ASR runtime including torch, FastAPI, uvicorn and
+qwen_asr.  The directory starts directly instead of unpacking a
+multi-gigabyte onefile archive on every application launch.
 
-Output is placed in ../src-tauri/binaries/ for Tauri sidecar bundling.
-Tauri's ``externalBin`` requires a single .exe file, so onefile mode is
-mandatory (onedir would produce a directory that Tauri cannot consume
-via externalBin).
+Output is placed in ../src-tauri/binaries/asr_backend and copied intact
+by the custom ZIP release builder. Tauri externalBin bundling is disabled.
 """
 
 import os
 import sys
-from PyInstaller.building.api import PYZ, EXE
+from PyInstaller.building.api import PYZ, EXE, COLLECT
 from PyInstaller.building.build_main import Analysis
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
@@ -80,11 +78,9 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
     name='asr_backend',
+    exclude_binaries=True,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -104,4 +100,22 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[
+        'torch',
+        'torchvision',
+        'torchaudio',
+        'nvidia',
+        'transformers',
+        'qwen_asr',
+    ],
+    name='asr_backend',
 )

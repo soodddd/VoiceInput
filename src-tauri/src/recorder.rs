@@ -32,6 +32,15 @@ pub struct AudioDeviceInfo {
     pub is_default: bool,
 }
 
+pub struct RecordingOptions {
+    pub device_index: Option<i32>,
+    pub device_name: Option<String>,
+    pub target_sample_rate: u32,
+    pub vad_enabled: bool,
+    pub max_record_sec: u32,
+    pub silence_threshold_db: i32,
+}
+
 /// 枚举系统所有可用输入设备。
 ///
 /// 遍历 cpal 默认主机的输入设备列表，返回每个设备的索引、名称、声道数
@@ -90,6 +99,19 @@ pub struct Recorder {
     sample_rate: u32,
 }
 
+fn append_bounded(
+    buffer: &Arc<Mutex<Vec<i16>>>,
+    samples: &[i16],
+    max_samples: usize,
+) -> bool {
+    if let Ok(mut data) = buffer.lock() {
+        let remaining = max_samples.saturating_sub(data.len());
+        data.extend_from_slice(&samples[..samples.len().min(remaining)]);
+        return data.len() >= max_samples;
+    }
+    false
+}
+
 impl Recorder {
     /// 创建新的录音器实例（未开始录音）。
     pub fn new() -> Self {
@@ -118,9 +140,7 @@ impl Recorder {
     pub fn start(
         &mut self,
         app: AppHandle,
-        device: Option<i32>,
-        sample_rate: u32,
-        vad_enabled: bool,
+        options: RecordingOptions,
     ) -> Result<(), String> {
         if self.recording.load(Ordering::SeqCst) {
             return Err("已经在录音中".to_string());
@@ -131,13 +151,18 @@ impl Recorder {
             let mut buf = self.buffer.lock().map_err(|e| format!("锁缓冲区失败: {}", e))?;
             buf.clear();
         }
-        self.recording.store(true, Ordering::SeqCst);
-        self.sample_rate = sample_rate;
-
         // 获取音频主机和设备
         let host = cpal::default_host();
 
-        let input_device = if let Some(idx) = device {
+        let input_device = if let Some(name) = options.device_name.filter(|name| !name.is_empty()) {
+            host.input_devices()
+                .map_err(|e| format!("枚举输入设备失败: {}", e))?
+                .find(|candidate| candidate.name().ok().as_deref() == Some(name.as_str()))
+                .ok_or_else(|| format!("找不到输入设备: {}", name))?
+        } else if let Some(idx) = options.device_index {
+            if idx < 0 {
+                return Err("输入设备索引不能为负数".to_string());
+            }
             // 尝试按索引选择设备
             let mut devices = host
                 .input_devices()
@@ -160,37 +185,17 @@ impl Recorder {
             .default_input_config()
             .map_err(|e| format!("获取默认输入配置失败: {}", e))?;
 
-        // 请求目标采样率；若设备不支持则使用设备默认值
-        let actual_sample_rate = if supported_config.sample_rate().0 == sample_rate {
-            sample_rate
-        } else {
-            // 尝试找到支持的采样率
+        // Use one complete supported configuration.  Mixing the default sample
+        // format/channels with a rate taken from another range can make WASAPI
+        // stream construction fail.  Python performs the final 16 kHz resample.
+        let actual_sample_rate = supported_config.sample_rate().0;
+        if actual_sample_rate != options.target_sample_rate {
             log::warn!(
-                "设备默认采样率为 {}，目标为 {}，尝试协商...",
-                supported_config.sample_rate().0,
-                sample_rate
+                "设备原生采样率为 {}Hz；后端将重采样到 {}Hz",
+                actual_sample_rate,
+                options.target_sample_rate,
             );
-            // 尝试检查是否支持目标采样率
-            let mut found = false;
-            if let Ok(formats) = input_device.supported_input_configs() {
-                for f in formats {
-                    if f.min_sample_rate().0 <= sample_rate
-                        && f.max_sample_rate().0 >= sample_rate
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if found {
-                sample_rate
-            } else {
-                let dev_sr = supported_config.sample_rate().0;
-                log::warn!("设备不支持 {}Hz，使用 {}Hz", sample_rate, dev_sr);
-                self.sample_rate = dev_sr;
-                dev_sr
-            }
-        };
+        }
 
         let channels = supported_config.channels().min(2); // 最多 2 声道，取 min
         let sample_format = supported_config.sample_format();
@@ -214,14 +219,18 @@ impl Recorder {
         let app_clone = app.clone();
         let channels_us = channels as usize;
         let last_emit = Arc::new(Mutex::new(Instant::now()));
+        let max_samples =
+            actual_sample_rate as usize * options.max_record_sec.max(1) as usize;
+        let max_triggered = Arc::new(AtomicBool::new(false));
 
         // P2-02: VAD 静音检测共享状态
         let record_start = Arc::new(Instant::now());
         let last_sound_time = Arc::new(Mutex::new(Instant::now()));
         let vad_triggered = Arc::new(AtomicBool::new(false));
-        let vad_enabled_clone = vad_enabled;
+        let vad_enabled_clone = options.vad_enabled;
         // VAD 参数
-        const VAD_SILENCE_THRESHOLD: f32 = 0.015; // RMS 阈值，低于此值视为静音
+        let vad_silence_threshold =
+            10_f32.powf(options.silence_threshold_db as f32 / 20.0);
         const VAD_MIN_RECORD_SEC: f64 = 1.0; // 最小录音时长（秒），避免一开始就触发
         const VAD_SILENCE_DURATION_SEC: f64 = 2.0; // 持续静音多久后触发
 
@@ -254,8 +263,10 @@ impl Recorder {
                             };
 
                             // 追加到缓冲区
-                            if let Ok(mut buf) = buffer_clone.lock() {
-                                buf.extend_from_slice(&mono);
+                            if append_bounded(&buffer_clone, &mono, max_samples)
+                                && !max_triggered.swap(true, Ordering::SeqCst)
+                            {
+                                let _ = app_clone.emit("recording-max-duration", ());
                             }
 
                             // 每 50ms emit 一次音量级别 + VAD 检测
@@ -269,7 +280,7 @@ impl Recorder {
                                     if vad_enabled_clone && !vad_triggered_inner.load(Ordering::SeqCst) {
                                         let elapsed_sec = record_start_inner.elapsed().as_secs_f64();
                                         if elapsed_sec >= VAD_MIN_RECORD_SEC {
-                                            if level > VAD_SILENCE_THRESHOLD {
+                                            if level > vad_silence_threshold {
                                                 if let Ok(mut t) = last_sound_inner.lock() {
                                                     *t = Instant::now();
                                                 }
@@ -325,8 +336,10 @@ impl Recorder {
                                     .collect()
                             };
 
-                            if let Ok(mut buf) = buffer_clone.lock() {
-                                buf.extend_from_slice(&i16_data);
+                            if append_bounded(&buffer_clone, &i16_data, max_samples)
+                                && !max_triggered.swap(true, Ordering::SeqCst)
+                            {
+                                let _ = app_clone.emit("recording-max-duration", ());
                             }
 
                             if let Ok(mut last) = last_emit_inner.lock() {
@@ -339,7 +352,7 @@ impl Recorder {
                                     if vad_enabled_clone && !vad_triggered_inner.load(Ordering::SeqCst) {
                                         let elapsed_sec = record_start_inner.elapsed().as_secs_f64();
                                         if elapsed_sec >= VAD_MIN_RECORD_SEC {
-                                            if level > VAD_SILENCE_THRESHOLD {
+                                            if level > vad_silence_threshold {
                                                 if let Ok(mut t) = last_sound_inner.lock() {
                                                     *t = Instant::now();
                                                 }
@@ -395,8 +408,10 @@ impl Recorder {
                                     .collect()
                             };
 
-                            if let Ok(mut buf) = buffer_clone.lock() {
-                                buf.extend_from_slice(&i16_data);
+                            if append_bounded(&buffer_clone, &i16_data, max_samples)
+                                && !max_triggered.swap(true, Ordering::SeqCst)
+                            {
+                                let _ = app_clone.emit("recording-max-duration", ());
                             }
 
                             if let Ok(mut last) = last_emit_inner.lock() {
@@ -409,7 +424,7 @@ impl Recorder {
                                     if vad_enabled_clone && !vad_triggered_inner.load(Ordering::SeqCst) {
                                         let elapsed_sec = record_start_inner.elapsed().as_secs_f64();
                                         if elapsed_sec >= VAD_MIN_RECORD_SEC {
-                                            if level > VAD_SILENCE_THRESHOLD {
+                                            if level > vad_silence_threshold {
                                                 if let Ok(mut t) = last_sound_inner.lock() {
                                                     *t = Instant::now();
                                                 }
@@ -442,6 +457,8 @@ impl Recorder {
         };
 
         stream.play().map_err(|e| format!("启动音频流失败: {}", e))?;
+        self.sample_rate = actual_sample_rate;
+        self.recording.store(true, Ordering::SeqCst);
         self.stream = Some(stream);
 
         log::info!("录音已开始 ({}Hz)", actual_sample_rate);
