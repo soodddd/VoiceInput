@@ -2,6 +2,8 @@
 
 **v0.1.3-preview · Windows 本地语音输入**
 
+应用版本号：**0.1.3**。GitHub 发布名保留 `-preview`，直到完整端到端验收完成。参见[文档导航](./docs/README.md)。
+
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [最新 Release](../../releases/tag/v0.1.3-preview) | [完整修复报告](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md) | [发布说明](./docs/RELEASE_NOTES_v0.1.3-preview.md)
@@ -66,7 +68,8 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 ### 第一步：下载
 
 1. 打开 [发布页面](../../releases)
-2. 下载名字叫 `VoiceInput-v0.1.3-preview-win64.zip` 的文件
+2. 此 Release 目前**没有可下载的运行包附件**，GitHub 自动生成的源码压缩包不能直接运行。请按下方开发说明从源码构建；打包前需要同时重建 Python 后端和桌面端。
+3. 经验证的 `VoiceInput-v0.1.3-preview-win64.zip` 可用后，再按下面的步骤解压运行。此前的本地 ZIP 不作为已验证的 0.1.3 分发包。
 
 ### 第二步：解压
 

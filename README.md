@@ -2,6 +2,8 @@
 
 **v0.1.3-preview · Windows Local Voice Input**
 
+Application version: **0.1.3**. The GitHub release keeps the `-preview` label until end-to-end acceptance is complete. See the [documentation index](./docs/README.md).
+
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [Latest Release](../../releases/tag/v0.1.3-preview) | [Fix and validation report](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md) | [Release notes](./docs/RELEASE_NOTES_v0.1.3-preview.md)
@@ -66,7 +68,8 @@ It works in most standard text fields — Word, chat boxes, and browser search b
 ### Step 1: Download
 
 1. Go to the [Releases page](../../releases)
-2. Download the file named `VoiceInput-v0.1.3-preview-win64.zip`
+2. This release currently has **no downloadable runtime asset**. GitHub's source archives are not runnable packages. Build from source using the development instructions below; rebuild both the Python backend and desktop app before packaging.
+3. When a verified `VoiceInput-v0.1.3-preview-win64.zip` becomes available, use the extraction steps below. The previous local ZIP is not a verified 0.1.3 distribution.
 
 ### Step 2: Extract
 
