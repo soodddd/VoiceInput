@@ -34,8 +34,11 @@ class Qwen3ASREngine:
 
     @property
     def is_loaded(self) -> bool:
-        with self._operation_lock:
-            return self.model is not None
+        # A status snapshot must not wait for load/inference. HTTP status
+        # handlers run on the event loop; waiting here would freeze health
+        # checks and could make the host restart a healthy, busy backend.
+        # Operations that use the model still acquire _operation_lock.
+        return self.model is not None
 
     def load(self, model_path: str | None = None) -> None:
         """Load an explicitly local model; never trigger an implicit hub download."""

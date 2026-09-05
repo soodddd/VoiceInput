@@ -85,3 +85,4 @@ backend/sidecar_*.log
 *.bin
 *.safetensors
 model_cache/
+test-artifacts/

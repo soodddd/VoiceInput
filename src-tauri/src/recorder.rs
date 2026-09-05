@@ -222,9 +222,13 @@ impl Recorder {
         let max_samples =
             actual_sample_rate as usize * options.max_record_sec.max(1) as usize;
         let max_triggered = Arc::new(AtomicBool::new(false));
+        // Keep the highest observed RMS level for actionable VAD diagnostics.
+        // This makes a silent-device/route problem distinguishable from a
+        // speech-recognition problem without storing or logging audio data.
+        let max_rms_level = Arc::new(Mutex::new(0.0_f32));
 
         // P2-02: VAD 静音检测共享状态
-        let record_start = Arc::new(Instant::now());
+        let record_start = Arc::new(Mutex::new(Instant::now()));
         let last_sound_time = Arc::new(Mutex::new(Instant::now()));
         let vad_triggered = Arc::new(AtomicBool::new(false));
         let vad_enabled_clone = options.vad_enabled;
@@ -242,6 +246,7 @@ impl Recorder {
                 let record_start_inner = record_start.clone();
                 let vad_triggered_inner = vad_triggered.clone();
                 let app_vad = app_clone.clone();
+                let max_level_inner = max_rms_level.clone();
                 input_device
                     .build_input_stream(
                         &stream_config,
@@ -273,12 +278,15 @@ impl Recorder {
                             if let Ok(mut last) = last_emit_inner.lock() {
                                 if last.elapsed() >= Duration::from_millis(50) {
                                     let level = compute_rms_level(&mono);
+                                    if let Ok(mut max_level) = max_level_inner.lock() {
+                                        *max_level = (*max_level).max(level);
+                                    }
                                     let _ = app_clone.emit("audio-level", level);
                                     *last = Instant::now();
 
                                     // P2-02: VAD 静音检测
                                     if vad_enabled_clone && !vad_triggered_inner.load(Ordering::SeqCst) {
-                                        let elapsed_sec = record_start_inner.elapsed().as_secs_f64();
+                                        let elapsed_sec = record_start_inner.lock().unwrap_or_else(|e| e.into_inner()).elapsed().as_secs_f64();
                                         if elapsed_sec >= VAD_MIN_RECORD_SEC {
                                             if level > vad_silence_threshold {
                                                 if let Ok(mut t) = last_sound_inner.lock() {
@@ -291,7 +299,11 @@ impl Recorder {
                                                 };
                                                 if silence_sec >= VAD_SILENCE_DURATION_SEC {
                                                     vad_triggered_inner.store(true, Ordering::SeqCst);
-                                                    log::info!("VAD: 检测到 {:.1}s 静音，自动停止录音", silence_sec);
+                                                    let max_level = max_level_inner
+                                                        .lock()
+                                                        .map(|value| *value)
+                                                        .unwrap_or(0.0);
+                                                    log::info!("VAD: 检测到 {:.1}s 静音，自动停止录音 (当前 RMS={:.6}, 最高 RMS={:.6})", silence_sec, level, max_level);
                                                     let _ = app_vad.emit("vad-silence-detected", ());
                                                 }
                                             }
@@ -313,6 +325,7 @@ impl Recorder {
                 let record_start_inner = record_start.clone();
                 let vad_triggered_inner = vad_triggered.clone();
                 let app_vad = app_clone.clone();
+                let max_level_inner = max_rms_level.clone();
                 input_device
                     .build_input_stream(
                         &stream_config,
@@ -345,12 +358,15 @@ impl Recorder {
                             if let Ok(mut last) = last_emit_inner.lock() {
                                 if last.elapsed() >= Duration::from_millis(50) {
                                     let level = compute_rms_level(&i16_data);
+                                    if let Ok(mut max_level) = max_level_inner.lock() {
+                                        *max_level = (*max_level).max(level);
+                                    }
                                     let _ = app_clone.emit("audio-level", level);
                                     *last = Instant::now();
 
                                     // P2-02: VAD 静音检测
                                     if vad_enabled_clone && !vad_triggered_inner.load(Ordering::SeqCst) {
-                                        let elapsed_sec = record_start_inner.elapsed().as_secs_f64();
+                                        let elapsed_sec = record_start_inner.lock().unwrap_or_else(|e| e.into_inner()).elapsed().as_secs_f64();
                                         if elapsed_sec >= VAD_MIN_RECORD_SEC {
                                             if level > vad_silence_threshold {
                                                 if let Ok(mut t) = last_sound_inner.lock() {
@@ -363,7 +379,11 @@ impl Recorder {
                                                 };
                                                 if silence_sec >= VAD_SILENCE_DURATION_SEC {
                                                     vad_triggered_inner.store(true, Ordering::SeqCst);
-                                                    log::info!("VAD: 检测到 {:.1}s 静音，自动停止录音", silence_sec);
+                                                    let max_level = max_level_inner
+                                                        .lock()
+                                                        .map(|value| *value)
+                                                        .unwrap_or(0.0);
+                                                    log::info!("VAD: 检测到 {:.1}s 静音，自动停止录音 (当前 RMS={:.6}, 最高 RMS={:.6})", silence_sec, level, max_level);
                                                     let _ = app_vad.emit("vad-silence-detected", ());
                                                 }
                                             }
@@ -385,6 +405,7 @@ impl Recorder {
                 let record_start_inner = record_start.clone();
                 let vad_triggered_inner = vad_triggered.clone();
                 let app_vad = app_clone.clone();
+                let max_level_inner = max_rms_level.clone();
                 input_device
                     .build_input_stream(
                         &stream_config,
@@ -417,12 +438,15 @@ impl Recorder {
                             if let Ok(mut last) = last_emit_inner.lock() {
                                 if last.elapsed() >= Duration::from_millis(50) {
                                     let level = compute_rms_level(&i16_data);
+                                    if let Ok(mut max_level) = max_level_inner.lock() {
+                                        *max_level = (*max_level).max(level);
+                                    }
                                     let _ = app_clone.emit("audio-level", level);
                                     *last = Instant::now();
 
                                     // P2-02: VAD 静音检测
                                     if vad_enabled_clone && !vad_triggered_inner.load(Ordering::SeqCst) {
-                                        let elapsed_sec = record_start_inner.elapsed().as_secs_f64();
+                                        let elapsed_sec = record_start_inner.lock().unwrap_or_else(|e| e.into_inner()).elapsed().as_secs_f64();
                                         if elapsed_sec >= VAD_MIN_RECORD_SEC {
                                             if level > vad_silence_threshold {
                                                 if let Ok(mut t) = last_sound_inner.lock() {
@@ -435,7 +459,11 @@ impl Recorder {
                                                 };
                                                 if silence_sec >= VAD_SILENCE_DURATION_SEC {
                                                     vad_triggered_inner.store(true, Ordering::SeqCst);
-                                                    log::info!("VAD: 检测到 {:.1}s 静音，自动停止录音", silence_sec);
+                                                    let max_level = max_level_inner
+                                                        .lock()
+                                                        .map(|value| *value)
+                                                        .unwrap_or(0.0);
+                                                    log::info!("VAD: 检测到 {:.1}s 静音，自动停止录音 (当前 RMS={:.6}, 最高 RMS={:.6})", silence_sec, level, max_level);
                                                     let _ = app_vad.emit("vad-silence-detected", ());
                                                 }
                                             }
@@ -457,6 +485,11 @@ impl Recorder {
         };
 
         stream.play().map_err(|e| format!("启动音频流失败: {}", e))?;
+        // Device initialization can take seconds. Start VAD timing only when
+        // the stream is ready, before allowing callbacks to accept samples.
+        let started = Instant::now();
+        *record_start.lock().unwrap_or_else(|e| e.into_inner()) = started;
+        *last_sound_time.lock().unwrap_or_else(|e| e.into_inner()) = started;
         self.sample_rate = actual_sample_rate;
         self.recording.store(true, Ordering::SeqCst);
         self.stream = Some(stream);
