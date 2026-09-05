@@ -52,6 +52,7 @@ from postprocess import (
     clean_transcription,
     merge_transcription_chunks,
 )
+from version import APP_VERSION
 
 # ── Logging ────────────────────────────────────────────────────────
 
@@ -65,6 +66,7 @@ logger = logging.getLogger("server")
 
 
 class HealthResponse(BaseModel):
+    version: str
     status: str
     model: str
     device: str
@@ -173,7 +175,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="VoiceInput ASR Backend",
-    version="0.1.3",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -187,6 +189,7 @@ async def health() -> HealthResponse:
     Used by the Tauri host to poll until the backend is ready.
     """
     return HealthResponse(
+        version=APP_VERSION,
         status="ok",
         model=config.MODEL_NAME,
         device=config.DEVICE,

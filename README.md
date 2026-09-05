@@ -1,12 +1,12 @@
 # VoiceInput
 
-**v0.1.3-preview · Windows Local Voice Input**
+**v0.1.4-preview · Windows Local Voice Input**
 
-Application version: **0.1.3**. The GitHub release keeps the `-preview` label until end-to-end acceptance is complete. See the [documentation index](./docs/README.md).
+Application version: **0.1.4**. This release focuses on usable, repeatable recording and a reproducible distribution path. It keeps the `-preview` label so hardware-specific feedback can continue. See the [documentation index](./docs/README.md).
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-[Latest Release](../../releases/tag/v0.1.3-preview) | [Fix and validation report](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md) | [Release notes](./docs/RELEASE_NOTES_v0.1.3-preview.md)
+[Latest Release](../../releases/tag/v0.1.4-preview) | [Chinese release notes](./docs/RELEASE_NOTES_v0.1.4-preview.zh-CN.md) | [English release notes](./docs/RELEASE_NOTES_v0.1.4-preview.en.md) | [Fix and validation report](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md)
 
 > ⚠️ **Preview Release** — This is an early preview version for testing and feedback. Expect bugs and breaking changes before the stable release.
 
@@ -16,9 +16,11 @@ This is a Windows desktop preview built with React, Tauri, Rust, and Python. The
 
 ### Current status
 
-- ✅ Source, tests, desktop app, and the onedir backend build successfully
-- ✅ Local NVIDIA GPU, Qwen3-ASR model loading, and microphone recording have been verified
-- ⚠️ Preview release: real speech recognition and target-application input still need confirmation on the target machine
+- ✅ Source version is synchronized at 0.1.4 across React, Rust/Tauri, and the Python sidecar
+- ✅ Local NVIDIA GPU, Qwen3-ASR loading, microphone recording, and automatic text entry have been verified
+- ✅ WASAPI capture is owned by a dedicated worker and audio-level events no longer block the realtime callback
+- ✅ The release flow validates fresh extraction, sidecar health, and a SHA-256 manifest
+- ⚠️ Preview release: elevated windows, games, and custom controls may still reject simulated input
 
 ---
 
@@ -46,6 +48,7 @@ It works in most standard text fields — Word, chat boxes, and browser search b
 - 🖥️ **System tray** — Quick access to settings, logs, and quit
 - ⚡ **VAD auto-stop** — Detects silence and stops recording automatically
 - 📋 **Clipboard-safe input** — Returns to the prior window and types without altering clipboard data
+- 🧪 **Audio diagnostics** — Includes a developer probe to distinguish microphone/input and Bluetooth speaker/output problems
 
 ---
 
@@ -68,8 +71,8 @@ It works in most standard text fields — Word, chat boxes, and browser search b
 ### Step 1: Download
 
 1. Go to the [Releases page](../../releases)
-2. This release currently has **no downloadable runtime asset**. GitHub's source archives are not runnable packages. Build from source using the development instructions below; rebuild both the Python backend and desktop app before packaging.
-3. When a verified `VoiceInput-v0.1.3-preview-win64.zip` becomes available, use the extraction steps below. The previous local ZIP is not a verified 0.1.3 distribution.
+2. This release currently has **no downloadable runtime asset** because the complete 0.1.4 onedir ZIP is about 2.73 GB and exceeds the GitHub Release per-asset limit. GitHub's source archives are not runnable packages; build from source using the instructions below or use a complete ZIP hosted in an external large-file store.
+3. If the release includes `VoiceInput-v0.1.4-preview-win64.zip`, download it. If the asset is temporarily unavailable, build from source using the instructions below. GitHub's generated source archive is not runnable by itself.
 
 ### Step 2: Extract
 
@@ -178,6 +181,7 @@ Add custom word corrections. For example, if the AI always mishears your name "X
 - The model download is about 1.9 GB; the release ZIP is about 2.7 GB, so plan for both separately.
 - Automatic entry depends on the target application accepting Windows input events; elevated windows, custom controls, and some games may reject it.
 - Compiled binaries and model caches are not committed to the repository. Download the complete release package and keep `asr_backend/_internal` beside the backend executable.
+- `audio_hardware_probe` is a developer diagnostic binary, not the normal application entry point; it reports the default devices and measured capture energy.
 
 ## Troubleshooting
 
@@ -237,7 +241,7 @@ npm run tauri -- build
 powershell -ExecutionPolicy Bypass -File .\build_release_zip.ps1
 ```
 
-The release zip is output to `.\release\VoiceInput-v0.1.3-preview-win64.zip`.
+The release zip is output to `.\release\VoiceInput-v0.1.4-preview-win64.zip`.
 
 > **Packaging note** — The backend is an onedir runtime (~2.7 GB including torch and transformers) to avoid unpacking a giant executable on every launch. The project ships a ZIP; keep the complete `asr_backend/_internal` directory beside `asr_backend.exe`.
 
@@ -298,7 +302,28 @@ MIT — see [LICENSE](./LICENSE).
 
 ## Changelog
 
-### v0.1.3-preview (Latest)
+### v0.1.4-preview (Latest)
+
+This release is focused on real usability, repeated use, and a reproducible release process. The desktop shell, recorder, Python sidecar, build scripts, and bilingual documentation are synchronized at 0.1.4.
+
+**Code and reliability:**
+- 🎙️ **Dedicated WASAPI recorder thread** — Each session creates, owns, and releases the `cpal` stream on one dedicated thread, reducing lifecycle conflicts between Tauri commands and Windows audio sessions.
+- 📈 **Decoupled audio-level delivery** — The realtime callback only converts samples, maintains the bounded buffer, and stores an atomic level snapshot. A lightweight 50 ms sampler sends `audio-level` events so the waveform and microphone test remain responsive.
+- ⏱️ **VAD timing fix** — Silence timing starts after the audio stream is actually running; WASAPI initialization time is not counted as user silence. Minimum-duration and continuous-silence guards remain enabled.
+- 🩺 **Better observability** — Stop logs include total RMS/peak; VAD logs include current/maximum RMS. A separate hardware probe can play Bluetooth-speaker audio while measuring microphone capture.
+- 🛡️ **Startup cleanup** — Recorder startup timeouts and failures wait for the worker to exit instead of leaving an orphan audio thread.
+
+**Release and documentation:**
+- `package.json`, Cargo, Tauri, FastAPI, and sidecar startup logging are synchronized to `0.1.4`.
+- The onedir release flow validates complete extraction, the relative `asr_backend/_internal` layout, the manifest, and backend health.
+- Added Chinese and English 0.1.4 release notes, upgrade guides, and validation records; 0.1.3 and 0.1.2 notes remain historical.
+
+**Upgrade notes:**
+- Replace `voiceinput.exe` and the complete `asr_backend` directory together; do not replace only one component.
+- Existing model caches remain compatible and do not need to be downloaded again. Re-select or re-download only if the model directory is damaged.
+- After upgrading, use Settings → Microphone → Test once, then complete a short voice input in Notepad or a browser text field.
+
+### v0.1.3-preview
 
 This release is a full stability, privacy, and distribution upgrade covering local GPU inference, recording, model lifecycle, safe text entry, recovery, and onedir packaging, with local validation completed.
 

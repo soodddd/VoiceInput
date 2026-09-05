@@ -12,6 +12,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -129,6 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("capture_seconds={CAPTURE_SECONDS}");
 
     let samples = Arc::new(Mutex::new(Vec::<i16>::new()));
+    let recording = Arc::new(AtomicBool::new(false));
+    let recording_for_callback = recording.clone();
     let samples_for_callback = samples.clone();
     let stream_config: StreamConfig = supported.clone().into();
     let error_callback = |error| eprintln!("input_stream_error={error}");
@@ -136,6 +139,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SampleFormat::I16 => input.build_input_stream(
             &stream_config,
             move |data: &[i16], _| {
+                if !recording_for_callback.load(Ordering::SeqCst) {
+                    return;
+                }
                 let mut buffer = samples_for_callback.lock().unwrap_or_else(|e| e.into_inner());
                 if channels == 1 {
                     buffer.extend_from_slice(data);
@@ -153,6 +159,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SampleFormat::F32 => input.build_input_stream(
             &stream_config,
             move |data: &[f32], _| {
+                if !recording_for_callback.load(Ordering::SeqCst) {
+                    return;
+                }
                 let mut buffer = samples_for_callback.lock().unwrap_or_else(|e| e.into_inner());
                 for frame in data.chunks(channels as usize) {
                     let average = frame.iter().copied().sum::<f32>() / frame.len() as f32;
@@ -165,6 +174,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SampleFormat::U16 => input.build_input_stream(
             &stream_config,
             move |data: &[u16], _| {
+                if !recording_for_callback.load(Ordering::SeqCst) {
+                    return;
+                }
                 let mut buffer = samples_for_callback.lock().unwrap_or_else(|e| e.into_inner());
                 for frame in data.chunks(channels as usize) {
                     let average = frame.iter().map(|&x| x as i64 - 32768).sum::<i64>()
@@ -179,6 +191,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     stream.play()?;
+    // Match VoiceInput's lifecycle ordering: callbacks are ignored until the
+    // stream is running and the recording flag is enabled.
+    recording.store(true, Ordering::SeqCst);
     thread::sleep(Duration::from_millis(500));
     if should_play {
         let _ = playback(&wav_path);

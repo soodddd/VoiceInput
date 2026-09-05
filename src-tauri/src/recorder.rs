@@ -9,6 +9,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
@@ -95,6 +96,11 @@ pub struct Recorder {
     buffer: Arc<Mutex<Vec<i16>>>,
     /// 活跃的 cpal 音频流（stop 时 drop）
     stream: Option<cpal::Stream>,
+    /// Dedicated thread that owns the WASAPI stream for its whole lifetime.
+    worker: Option<JoinHandle<()>>,
+    /// Sends the latest level to the WebView without blocking the realtime
+    /// cpal callback.
+    level_sampler: Option<JoinHandle<()>>,
     /// 实际使用的采样率
     sample_rate: u32,
 }
@@ -119,8 +125,70 @@ impl Recorder {
             recording: Arc::new(AtomicBool::new(false)),
             buffer: Arc::new(Mutex::new(Vec::new())),
             stream: None,
+            worker: None,
+            level_sampler: None,
             sample_rate: 16000,
         }
+    }
+
+    /// Start capture on a dedicated thread.
+    ///
+    /// WASAPI streams are created and released on the same worker thread. The
+    /// public Tauri command only waits for stream startup, then returns while
+    /// the worker owns the native stream. This keeps COM/thread affinity out
+    /// of the command lifecycle and makes desktop capture match the probe.
+    pub fn start(
+        &mut self,
+        app: AppHandle,
+        options: RecordingOptions,
+    ) -> Result<(), String> {
+        if self.recording.load(Ordering::SeqCst) {
+            return Err("已经在录音中".to_string());
+        }
+        if self.worker.is_some() {
+            return Err("上一次录音线程尚未退出".to_string());
+        }
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let mut worker_recorder = Recorder {
+            recording: self.recording.clone(),
+            buffer: self.buffer.clone(),
+            stream: None,
+            worker: None,
+            level_sampler: None,
+            sample_rate: self.sample_rate,
+        };
+        let worker = thread::spawn(move || {
+            let result = worker_recorder.start_legacy(app, options);
+            let sample_rate = worker_recorder.sample_rate;
+            let started = result.is_ok();
+            let _ = ready_tx.send((result, sample_rate));
+            if started {
+                while worker_recorder.is_recording() {
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
+            if let Some(sampler) = worker_recorder.level_sampler.take() {
+                let _ = sampler.join();
+            }
+            // worker_recorder drops here, releasing the WASAPI stream on the
+            // same thread that created it.
+        });
+
+        let (result, sample_rate) = match ready_rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = worker.join();
+                return Err("启动音频流超时".to_string());
+            }
+        };
+        if let Err(error) = result {
+            let _ = worker.join();
+            return Err(error);
+        }
+        self.sample_rate = sample_rate;
+        self.worker = Some(worker);
+        Ok(())
     }
 
     /// 开始录音。
@@ -137,7 +205,7 @@ impl Recorder {
     /// 3. 启动音频流，回调中收集 samples 到 buffer
     /// 4. 每 50ms 计算一次 RMS 并 emit "audio-level" 事件
     /// 5. 若 VAD 启用，检测持续静音 2 秒后 emit "vad-silence-detected"
-    pub fn start(
+    fn start_legacy(
         &mut self,
         app: AppHandle,
         options: RecordingOptions,
@@ -231,6 +299,7 @@ impl Recorder {
         let record_start = Arc::new(Mutex::new(Instant::now()));
         let last_sound_time = Arc::new(Mutex::new(Instant::now()));
         let vad_triggered = Arc::new(AtomicBool::new(false));
+        let current_level = Arc::new(std::sync::atomic::AtomicU32::new(0.0_f32.to_bits()));
         let vad_enabled_clone = options.vad_enabled;
         // VAD 参数
         let vad_silence_threshold =
@@ -247,6 +316,7 @@ impl Recorder {
                 let vad_triggered_inner = vad_triggered.clone();
                 let app_vad = app_clone.clone();
                 let max_level_inner = max_rms_level.clone();
+                let current_level_inner = current_level.clone();
                 input_device
                     .build_input_stream(
                         &stream_config,
@@ -281,7 +351,11 @@ impl Recorder {
                                     if let Ok(mut max_level) = max_level_inner.lock() {
                                         *max_level = (*max_level).max(level);
                                     }
-                                    let _ = app_clone.emit("audio-level", level);
+                                    current_level_inner.store(level.to_bits(), Ordering::Relaxed);
+                                    // Do not synchronously cross into the
+                                    // WebView from the real-time audio
+                                    // callback. The UI meter is updated by a
+                                    // lightweight sampler thread below.
                                     *last = Instant::now();
 
                                     // P2-02: VAD 静音检测
@@ -326,6 +400,7 @@ impl Recorder {
                 let vad_triggered_inner = vad_triggered.clone();
                 let app_vad = app_clone.clone();
                 let max_level_inner = max_rms_level.clone();
+                let current_level_inner = current_level.clone();
                 input_device
                     .build_input_stream(
                         &stream_config,
@@ -361,7 +436,9 @@ impl Recorder {
                                     if let Ok(mut max_level) = max_level_inner.lock() {
                                         *max_level = (*max_level).max(level);
                                     }
-                                    let _ = app_clone.emit("audio-level", level);
+                                    current_level_inner.store(level.to_bits(), Ordering::Relaxed);
+                                    // UI audio-level delivery is decoupled from
+                                    // this real-time callback.
                                     *last = Instant::now();
 
                                     // P2-02: VAD 静音检测
@@ -406,6 +483,7 @@ impl Recorder {
                 let vad_triggered_inner = vad_triggered.clone();
                 let app_vad = app_clone.clone();
                 let max_level_inner = max_rms_level.clone();
+                let current_level_inner = current_level.clone();
                 input_device
                     .build_input_stream(
                         &stream_config,
@@ -441,7 +519,9 @@ impl Recorder {
                                     if let Ok(mut max_level) = max_level_inner.lock() {
                                         *max_level = (*max_level).max(level);
                                     }
-                                    let _ = app_clone.emit("audio-level", level);
+                                    current_level_inner.store(level.to_bits(), Ordering::Relaxed);
+                                    // UI audio-level delivery is decoupled from
+                                    // this real-time callback.
                                     *last = Instant::now();
 
                                     // P2-02: VAD 静音检测
@@ -494,6 +574,19 @@ impl Recorder {
         self.recording.store(true, Ordering::SeqCst);
         self.stream = Some(stream);
 
+        // Keep UI updates off the audio callback.  The callback only stores
+        // an atomic snapshot; this sampler is allowed to cross into Tauri's
+        // WebView event system and is joined during stop.
+        let meter_recording = self.recording.clone();
+        let meter_level = current_level.clone();
+        self.level_sampler = Some(thread::spawn(move || {
+            while meter_recording.load(Ordering::SeqCst) {
+                let level = f32::from_bits(meter_level.load(Ordering::Relaxed));
+                let _ = app.emit("audio-level", level);
+                thread::sleep(Duration::from_millis(50));
+            }
+        }));
+
         log::info!("录音已开始 ({}Hz)", actual_sample_rate);
         Ok(())
     }
@@ -510,6 +603,14 @@ impl Recorder {
         }
 
         self.recording.store(false, Ordering::SeqCst);
+
+        // Ask the dedicated owner thread to exit, then wait until it has
+        // dropped the native WASAPI stream before reading the buffer.
+        if let Some(worker) = self.worker.take() {
+            worker
+                .join()
+                .map_err(|_| "录音线程异常退出".to_string())?;
+        }
 
         // 停止并释放音频流
         if let Some(stream) = self.stream.take() {
@@ -528,15 +629,23 @@ impl Recorder {
             data
         };
 
+        let captured_rms = compute_rms_level(&samples);
+        let captured_peak = samples
+            .iter()
+            .map(|sample| (*sample as f32 / 32768.0).abs())
+            .fold(0.0_f32, f32::max);
+
         if samples.is_empty() {
             return Err("录音数据为空".to_string());
         }
 
         log::info!(
-            "录音结束，共 {} 个采样 ({:.1}秒 @ {}Hz)",
+            "录音结束，共 {} 个采样 ({:.1}秒 @ {}Hz, RMS={:.6}, 峰值={:.6})",
             samples.len(),
             samples.len() as f32 / self.sample_rate as f32,
-            self.sample_rate
+            self.sample_rate,
+            captured_rms,
+            captured_peak
         );
 
         let wav = samples_to_wav(&samples, self.sample_rate);

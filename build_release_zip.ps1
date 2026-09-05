@@ -5,11 +5,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$TauriConfig = Get-Content (Join-Path $ProjectRoot "src-tauri\tauri.conf.json") -Raw |
+    ConvertFrom-Json
 if (-not $Version) {
-    $TauriConfig = Get-Content (Join-Path $ProjectRoot "src-tauri\tauri.conf.json") -Raw |
-        ConvertFrom-Json
     $Version = "$($TauriConfig.version)-preview"
 }
+$ExpectedAppVersion = $TauriConfig.version
 
 $VoiceinputExe = Join-Path $ProjectRoot "src-tauri\target\release\voiceinput.exe"
 $BackendDir = Join-Path $ProjectRoot "src-tauri\binaries\asr_backend"
@@ -140,7 +141,7 @@ VoiceInput v$Version - Windows 本地语音输入
     while ([DateTime]::UtcNow -lt $Deadline -and -not $BackendProcess.HasExited) {
         try {
             $Health = Invoke-RestMethod -Uri "http://127.0.0.1:$SmokePort/health" -TimeoutSec 2
-            if ($Health.status -eq "ok") {
+            if ($Health.status -eq "ok" -and $Health.version -eq $ExpectedAppVersion) {
                 $Healthy = $true
                 break
             }
@@ -149,7 +150,7 @@ VoiceInput v$Version - Windows 本地语音输入
         }
     }
     if (-not $Healthy) {
-        throw "Fresh-extraction backend health smoke test failed."
+        throw "Fresh-extraction backend health/version smoke test failed. Expected version $ExpectedAppVersion."
     }
 
     Write-Host "[6/6] Release verification complete."

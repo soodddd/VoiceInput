@@ -1,12 +1,12 @@
 # VoiceInput
 
-**v0.1.3-preview · Windows 本地语音输入**
+**v0.1.4-preview · Windows 本地语音输入**
 
-应用版本号：**0.1.3**。GitHub 发布名保留 `-preview`，直到完整端到端验收完成。参见[文档导航](./docs/README.md)。
+应用版本号：**0.1.4**。这是一次可运行性和录音稳定性升级；GitHub 发布名保留 `-preview`，便于继续收集不同硬件上的反馈。参见[文档导航](./docs/README.md)。
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-[最新 Release](../../releases/tag/v0.1.3-preview) | [完整修复报告](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md) | [发布说明](./docs/RELEASE_NOTES_v0.1.3-preview.md)
+[最新 Release](../../releases/tag/v0.1.4-preview) | [0.1.4 中文发布说明](./docs/RELEASE_NOTES_v0.1.4-preview.zh-CN.md) | [英文发布说明](./docs/RELEASE_NOTES_v0.1.4-preview.en.md) | [完整修复报告](./docs/CODE_REVIEW_FIX_REPORT_2026-09-03.md)
 
 > ⚠️ **预览版本（Preview）** — 这是用于测试和反馈的早期预览版本，正式版发布前可能有 bug 和变动。
 
@@ -16,9 +16,11 @@
 
 ### 当前状态
 
-- ✅ 源码、测试、桌面端和 onedir 后端已完成构建
-- ✅ 本机 NVIDIA GPU、Qwen3-ASR 模型加载、麦克风录音链路已验证
-- ⚠️ 当前为 Preview；不同电脑上的真实中文/英文识别和目标程序输入仍需用户现场确认
+- ✅ 源码版本已统一为 0.1.4，Rust、React、Python sidecar 同步
+- ✅ 本机 NVIDIA GPU、Qwen3-ASR 模型加载、麦克风录音与自动输入已验证
+- ✅ 录音在独立工作线程中拥有 WASAPI 流，音量事件不会阻塞实时音频回调
+- ✅ 发布构建包含 fresh-extraction、sidecar 健康检查和 SHA-256 清单验证
+- ⚠️ 当前为 Preview；管理员窗口、游戏和自绘控件仍可能拒绝自动输入
 
 ---
 
@@ -46,6 +48,7 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 - 🖥️ **系统托盘** — 快速访问设置、日志和退出
 - ⚡ **VAD 静音停止** — 检测到静音自动停止录音
 - 📋 **安全输入** — 自动返回原光标窗口并输入文字，不修改图片、文件或文本剪贴板
+- 🧪 **录音诊断** — 提供独立的麦克风/扬声器硬件探针，便于区分设备问题和应用问题
 
 ---
 
@@ -68,8 +71,8 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 ### 第一步：下载
 
 1. 打开 [发布页面](../../releases)
-2. 此 Release 目前**没有可下载的运行包附件**，GitHub 自动生成的源码压缩包不能直接运行。请按下方开发说明从源码构建；打包前需要同时重建 Python 后端和桌面端。
-3. 经验证的 `VoiceInput-v0.1.3-preview-win64.zip` 可用后，再按下面的步骤解压运行。此前的本地 ZIP 不作为已验证的 0.1.3 分发包。
+2. 此 Release 目前**没有可下载的运行包附件**：完整 0.1.4 onedir ZIP 约 2.73 GB，超过 GitHub Release 单资产限制。GitHub 自动生成的源码压缩包不能直接运行；请按下方开发说明从源码构建，或使用外部大文件存储提供的完整 ZIP。
+3. 如果 Release 附带 `VoiceInput-v0.1.4-preview-win64.zip`，下载它；如果附件暂不可用，请按“从源码构建”操作。GitHub 自动生成的源码压缩包不能直接运行。
 
 ### 第二步：解压
 
@@ -178,6 +181,7 @@ VoiceInput 就像一个帮你打字的小助手。你不用自己敲键盘，只
 - 模型首次下载约 1.9 GB；发布 ZIP 约 2.7 GB，二者需要分别准备磁盘空间。
 - 自动输入依赖目标程序接受 Windows 输入事件；管理员窗口、自绘控件和部分游戏可能拒绝输入。
 - 仓库不提交编译产物和模型缓存；请从 Releases 下载完整运行包，并保留 `asr_backend/_internal`。
+- `audio_hardware_probe` 是开发诊断工具，不是日常启动入口；它会报告默认输入/输出设备及实际采样能量。
 
 ## 常见问题
 
@@ -237,7 +241,7 @@ npm run tauri -- build
 powershell -ExecutionPolicy Bypass -File .\build_release_zip.ps1
 ```
 
-发布的 zip 输出到 `.\release\VoiceInput-v0.1.3-preview-win64.zip`。
+发布的 zip 输出到 `.\release\VoiceInput-v0.1.4-preview-win64.zip`。
 
 > **打包说明** — 后端使用 onedir 运行时（包含 torch 与 transformers，约 2.7 GB），避免每次启动都解压超大单文件。项目使用 ZIP 分发，必须让 `asr_backend/_internal` 与 `asr_backend.exe` 保持原有相对位置。
 
@@ -298,7 +302,28 @@ MIT — 见 [LICENSE](./LICENSE)。
 
 ## 更新日志
 
-### v0.1.3-preview（最新版本）
+### v0.1.4-preview（最新版本）
+
+这是一次以“实际可用、连续使用、可发布”为目标的版本升级。桌面端、录音器、Python sidecar、构建脚本和中英文文档统一到 0.1.4。
+
+**代码与稳定性：**
+- 🎙️ **WASAPI 录音线程隔离** — 每次录音在专用线程创建、持有并释放 `cpal` 流，降低 Tauri 命令线程与 Windows 音频会话之间的生命周期冲突。
+- 📈 **音量事件解耦** — 实时音频回调只做采样转换、限长缓存和原子音量快照；`audio-level` 由轻量采样线程按 50ms 推送，波形和设置里的麦克风测试保持流畅。
+- ⏱️ **VAD 时序修复** — 静音计时从音频流真正启动后开始，不把 WASAPI 初始化耗时算进用户说话时间；保留最短录音时长和连续静音停止保护。
+- 🩺 **可观测性增强** — 停止录音记录总 RMS/峰值，VAD 记录当前/最高 RMS；新增独立硬件探针，可同时播放蓝牙扬声器音频并采集麦克风。
+- 🛡️ **启动失败回收** — 录音线程启动超时或失败时会等待线程结束，避免遗留后台音频线程。
+
+**发布与文档：**
+- 统一 `package.json`、Cargo、Tauri 配置、FastAPI 版本和 sidecar 启动日志为 `0.1.4`。
+- 发布脚本继续使用 onedir 结构，验证完整解压、`asr_backend/_internal` 相对位置、清单和后端健康检查。
+- 新增中英文 0.1.4 发布说明、升级指南和验证记录；0.1.3/0.1.2 文档保留为历史记录。
+
+**升级注意：**
+- 从 0.1.3 升级时必须替换完整的 `voiceinput.exe` 与 `asr_backend` 目录，不能只替换一个文件。
+- 旧模型缓存可继续使用，不需要重复下载；若模型目录损坏，再在设置页重新选择或下载。
+- 首次启动后建议先打开“设置 → 麦克风 → 测试”，再在 Notepad/浏览器文本框中完成一次短语音输入。
+
+### v0.1.3-preview
 
 本版本是一次完整的稳定性、隐私和发布流程升级：补齐本地 GPU 推理、录音、模型管理、自动输入、错误恢复和 onedir 发布链路，并完成本机验证。
 

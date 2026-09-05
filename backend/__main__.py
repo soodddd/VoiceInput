@@ -16,6 +16,8 @@ import os
 import sys
 from pathlib import Path
 
+from version import APP_VERSION
+
 
 def _default_model_dir() -> str:
     """Return the platform-appropriate default model directory."""
@@ -77,7 +79,7 @@ def main(argv: list[str] | None = None) -> None:
         stream=sys.stdout,
     )
     logger = logging.getLogger("asr_backend")
-    logger.info("Starting VoiceInput ASR backend v0.1.3")
+    logger.info("Starting VoiceInput ASR backend v%s", APP_VERSION)
 
     # Import after logging is configured so init messages are captured
     import config
